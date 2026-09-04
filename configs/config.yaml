@@ -12,8 +12,8 @@ project:
 data:
   # ---- CrackSeg9k: flat folders of images and binary masks -------------------
   crackseg9k:
-    images_dir: "D:/datasets/crackseg9k/images"
-    masks_dir: "D:/datasets/crackseg9k/masks"
+    images_dir: "datasets/crackseg9k/images"
+    masks_dir: "datasets/crackseg9k/masks"
     # Masks are binarised as (mask > mask_threshold) -> crack = 1.
     mask_threshold: 0
     # Random split, stratified is not needed for a binary dense task.
@@ -22,7 +22,7 @@ data:
 
   # ---- dacl10k: official layout images/<split>, annotations/<split> ---------
   dacl10k:
-    root: "D:/datasets/dacl10k"
+    root: "datasets/dacl10k"
     train_split: "train"
     val_split: "validation"
 

@@ -4,7 +4,7 @@ venv/
 env/
 
 # Data and Images
-data/
+/datasets/
 *.zip
 *.tar.gz
 
