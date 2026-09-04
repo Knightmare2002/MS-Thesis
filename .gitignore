@@ -1,0 +1,20 @@
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Data and Images
+data/
+*.zip
+*.tar.gz
+
+# Checkpoint and Results
+outputs/
+*.pt
+*.pth
+*.onnx
+
+# Cache Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/

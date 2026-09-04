@@ -1,0 +1,71 @@
+# =============================================================================
+# Single source of truth for paths and hyper-parameters.
+# Override any field from the CLI, e.g.:
+#   python scripts/02_train_unet.py --config configs/config.yaml --set train.epochs=5
+# =============================================================================
+
+project:
+  seed: 42
+  # Everything the scripts write (figures, csv, checkpoints) goes under this root.
+  output_dir: "outputs"
+
+data:
+  # ---- CrackSeg9k: flat folders of images and binary masks -------------------
+  crackseg9k:
+    images_dir: "D:/datasets/crackseg9k/images"
+    masks_dir: "D:/datasets/crackseg9k/masks"
+    # Masks are binarised as (mask > mask_threshold) -> crack = 1.
+    mask_threshold: 0
+    # Random split, stratified is not needed for a binary dense task.
+    val_fraction: 0.15
+    test_fraction: 0.15
+
+  # ---- dacl10k: official layout images/<split>, annotations/<split> ---------
+  dacl10k:
+    root: "D:/datasets/dacl10k"
+    train_split: "train"
+    val_split: "validation"
+
+  # Input resolution fed to the network (square). 512 is the dacl10k baseline;
+  # drop to 384 or 320 if Colab VRAM is tight.
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+
+model:
+  arch: "unet"                 # unet | unetplusplus | deeplabv3plus
+  encoder: "resnet34"          # smp encoder name
+  encoder_weights: "imagenet"  # null to train from scratch
+  in_channels: 3
+  classes: 1                   # binary crack segmentation
+
+loss:
+  # Total loss = bce_weight * BCEWithLogits + dice_weight * SoftDice
+  bce_weight: 0.5
+  dice_weight: 0.5
+  # >1.0 up-weights the (rare) crack pixels inside the BCE term.
+  pos_weight: 2.0
+
+train:
+  epochs: 20
+  batch_size: 8
+  accumulation_steps: 1        # effective batch = batch_size * accumulation_steps
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true                    # mixed precision: ~2x faster on Colab T4
+  # Cosine annealing with warm restarts (SGDR).
+  scheduler:
+    t_0: 5                     # epochs before the first restart
+    t_mult: 2                  # each cycle lasts t_mult times the previous one
+    eta_min: 0.000005
+  # Model selection + early stopping are driven by validation Dice.
+  early_stopping_patience: 8
+  # Colab-safe: the run resumes from last.pt if the session dies.
+  resume: true
+
+eval:
+  # Threshold applied to sigmoid(logits). 03_evaluate.py also sweeps it.
+  threshold: 0.5
+  threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7]
+  n_qualitative_samples: 8
