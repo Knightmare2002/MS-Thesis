@@ -75,14 +75,23 @@ def dacl10k_stats(
     rows = []
     for image_path, ann_path in tqdm(samples, desc="EDA dacl10k"):
         annotation = load_annotation(ann_path)
-        width = int(annotation["imageWidth"])
-        height = int(annotation["imageHeight"])
+        with Image.open(image_path) as image:
+            width, height = image.size
+
+        json_width = int(annotation["imageWidth"])
+        json_height = int(annotation["imageHeight"])
         labels = present_labels(annotation)
 
         row: dict[str, object] = {
             "image": image_path.name,
             "width": width,
             "height": height,
+            "json_width": json_width,
+            "json_height": json_height,
+            "size_matches_json": (
+                width == json_width
+                and height == json_height
+            ),
             "aspect_ratio": round(width / height, 4),
             "n_shapes": len(annotation.get("shapes", [])),
             "n_classes": len(labels),

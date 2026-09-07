@@ -55,6 +55,21 @@ def load_annotation(path: str | Path) -> dict:
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
 
+def list_images(root: str | Path, split: str) -> list[Path]:
+    """List image files for any DACL10K split, including unlabeled testdev."""
+    images_dir = Path(root) / "images" / split
+    if not images_dir.is_dir():
+        raise FileNotFoundError(
+            f"Expected image directory: {images_dir}"
+        )
+
+    images = sorted(images_dir.glob("*.jpg"))
+    if not images:
+        raise RuntimeError(
+            f"No .jpg images found in {images_dir}"
+        )
+
+    return images
 
 # --------------------------------------------------------------------------- #
 # Rasterisation

@@ -132,9 +132,17 @@ def main() -> None:
     if "dacl10k" not in args.skip:
         samples = d10k.list_samples(cfg.data.dacl10k.root, cfg.data.dacl10k.train_split)
         print(f"[dacl10k/{cfg.data.dacl10k.train_split}] {len(samples)} annotated images")
-        df = dacl10k_stats(samples, compute_crack_ratio=True, sample=args.sample, seed=cfg.project.seed)
+        df = dacl10k_stats(
+            samples, 
+            compute_crack_ratio=True, 
+            sample=args.sample, 
+            seed=cfg.project.seed)
         df.to_csv(eda_dir / "dacl10k_per_image.csv", index=False)
 
+        positive_ratios = df.loc[
+            df["crack_pixels"] > 0,
+            "crack_ratio"
+        ]
         freq = dacl10k_class_frequency(df)
         freq.to_csv(eda_dir / "dacl10k_class_frequency.csv", index=False)
         plot_class_frequency(freq, figures_dir / "dacl10k_class_frequency.png")
@@ -151,6 +159,18 @@ def main() -> None:
                 "median_crack_ratio_%": round(df.crack_ratio.median() * 100, 3),
                 "empty_masks_%": round((df.crack_pixels == 0).mean() * 100, 2),
                 "n_classes": 19,
+                "crack_positive_images_%": round(
+                    (df["crack_pixels"] > 0).mean() * 100,
+                    2,
+                ),
+                "mean_crack_ratio_positive_%": round(
+                    positive_ratios.mean() * 100,
+                    3,
+                ) if not positive_ratios.empty else float("nan"),
+                "median_crack_ratio_positive_%": round(
+                    positive_ratios.median() * 100,
+                    3,
+                ) if not positive_ratios.empty else float("nan"),
             }
         )
         print(freq.head(10).to_string(index=False))

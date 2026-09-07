@@ -1,6 +1,7 @@
 # Core DL stack
-torch>=2.2
-torchvision>=0.17
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.7.1+cu118
+torchvision==0.22.1+cu118
 segmentation-models-pytorch>=0.3.3
 albumentations>=2.0.0
 opencv-python-headless>=4.9
