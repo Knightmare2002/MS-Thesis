@@ -5,9 +5,11 @@ Rationale for the augmentations
 * Cracks are thin, low-contrast, orientation-agnostic structures: flips and
   90-degree rotations are safe and effective; heavy elastic warping is avoided
   because it can destroy 1-2 px wide crack topology.
+
 * Real inspection photos vary a lot in exposure and white balance, hence the
   brightness/contrast and gamma jitter (cheap domain randomisation, which is
   what should help on the external UAV/RGB blind test set).
+  
 * Normalisation uses ImageNet statistics because the smp encoders are
   ImageNet-pretrained.
 """

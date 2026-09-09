@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def plot_curves(history_path: Path, out_path: Path) -> None:
-    """Loss curves + validation Dice/IoU, the two figures the slides need."""
+    """Loss curves + validation Dice/IoU."""
     history = pd.read_csv(history_path)
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 

@@ -25,6 +25,13 @@ data:
     root: "datasets/dacl10k"
     train_split: "train"
     val_split: "validation"
+    crack_labels: ["Crack", "ACrack"]
+
+  p1:
+    task_name: "dacl10k_crack_binary"
+    train_positive_fraction: 0.50
+    use_weighted_sampler: true
+    save_qualitative_split: "val"
 
   # Input resolution fed to the network (square). 512 is the dacl10k baseline;
   # drop to 384 or 320 if Colab VRAM is tight.
@@ -48,24 +55,22 @@ loss:
   pos_weight: 2.0
 
 train:
-  epochs: 20
-  batch_size: 8
-  accumulation_steps: 1        # effective batch = batch_size * accumulation_steps
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2        # effective batch = batch_size * accumulation_steps
   lr: 0.0003
   weight_decay: 0.0001
   amp: true                    # mixed precision: ~2x faster on Colab T4
+  early_stopping_patience: 8
+  resume: true
   # Cosine annealing with warm restarts (SGDR).
   scheduler:
     t_0: 5                     # epochs before the first restart
     t_mult: 2                  # each cycle lasts t_mult times the previous one
     eta_min: 0.000005
-  # Model selection + early stopping are driven by validation Dice.
-  early_stopping_patience: 8
-  # Colab-safe: the run resumes from last.pt if the session dies.
-  resume: true
 
 eval:
-  # Threshold applied to sigmoid(logits). 03_evaluate.py also sweeps it.
+  # Threshold applied to sigmoid(logits).
   threshold: 0.5
   threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7]
-  n_qualitative_samples: 8
+  n_qualitative_samples: 6

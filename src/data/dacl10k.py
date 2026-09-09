@@ -125,6 +125,47 @@ def present_labels(annotation: dict) -> set[str]:
         if s.get("label") in DACL10K_CLASS_TO_IDX
     }
 
+# --------------------------------------------------------------------------- #
+# P1 helpers: binary crack target and image-level balancing
+# --------------------------------------------------------------------------- #
+def sample_has_positive_mask(
+    annotation_path: str | Path,
+    labels: list[str] | None = None,
+) -> bool:
+    """Return True when at least one non-degenerate target polygon is present."""
+    labels = set(labels or CRACK_LIKE_DACL10K)
+    annotation = load_annotation(annotation_path)
+
+    for shape_dict in annotation.get("shapes", []):
+        if shape_dict.get("label") in labels and len(shape_dict.get("points", [])) >= 3:
+            return True
+    return False
+
+
+def binary_sample_targets(
+    samples: list[tuple[Path, Path]],
+    labels: list[str] | None = None,
+) -> list[int]:
+    """Return image-level targets: 1 if Crack/ACrack is present, else 0."""
+    return [int(sample_has_positive_mask(annotation_path, labels)) for _, annotation_path in samples]
+
+
+def summarize_binary_targets(targets: list[int]) -> dict[str, float | int]:
+    """Summarize the crack-positive/negative composition of a DACL10K split."""
+    n_total = len(targets)
+    n_positive = int(sum(targets))
+    n_negative = n_total - n_positive
+
+    if n_total == 0:
+        raise ValueError("Cannot summarize an empty DACL10K split.")
+
+    return {
+        "n_images": n_total,
+        "n_positive": n_positive,
+        "n_negative": n_negative,
+        "positive_fraction": n_positive / n_total,
+        "negative_fraction": n_negative / n_total,
+    }
 
 # --------------------------------------------------------------------------- #
 # Dataset (binary crack view, used as external validation of the week-3 U-Net)

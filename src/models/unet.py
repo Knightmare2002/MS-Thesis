@@ -34,7 +34,7 @@ def build_model(cfg) -> nn.Module:
 
 
 def count_parameters(model: nn.Module) -> tuple[int, int]:
-    """Return (total, trainable) parameter counts - useful for the PPT table."""
+    """Return (total, trainable) parameter counts."""
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
