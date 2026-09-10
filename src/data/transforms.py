@@ -59,3 +59,35 @@ def eval_transform(image_size: int) -> A.Compose:
             ToTensorV2(),
         ]
     )
+
+def patch_train_transform() -> A.Compose:
+    """Augmentations for an already extracted native-resolution training patch."""
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.2),
+            A.RandomRotate90(p=0.5),
+            A.Affine(
+                translate_percent=(-0.05, 0.05),
+                scale=(0.85, 1.15),
+                rotate=(-15, 15),
+                border_mode=cv2.BORDER_CONSTANT,
+                p=0.5,
+            ),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+            A.RandomGamma(gamma_limit=(80, 120), p=0.3),
+            A.GaussNoise(p=0.2),
+            A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ToTensorV2(),
+        ]
+    )
+
+
+def patch_eval_transform() -> A.Compose:
+    """Deterministic normalization for native-resolution sliding-window patches."""
+    return A.Compose(
+        [
+            A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ToTensorV2(),
+        ]
+    )

@@ -113,6 +113,10 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
     last_path, best_path = output_dir / "last.pt", output_dir / "best.pt"
     history_path = output_dir / "history.csv"
 
+    # The model must be on the target device before constructing/loading AdamW.
+    # Otherwise Adam moment tensors restored from a checkpoint can remain on CPU
+    model.to(device)
+
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay
     )
@@ -133,7 +137,6 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
         start_epoch, best_dice = checkpoint["epoch"] + 1, checkpoint["best_dice"]
         print(f"[fit] resumed from {last_path} at epoch {start_epoch} (best dice {best_dice:.4f})")
 
-    model.to(device)
     best_metrics: dict[str, float] = {}
 
     for epoch in range(start_epoch, cfg.train.epochs):
