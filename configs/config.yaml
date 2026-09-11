@@ -34,16 +34,19 @@ data:
     save_qualitative_split: "val"
 
   p1_patch:
-    task_name: "dacl10k_crack_patch"
+    task_name: "dacl10k_crack_patch_glb_positive_quota"
     patch_size: 512
-    positive_patch_fraction: 0.70
-    min_positive_pixels: 64
-    max_crop_attempts: 30       # maximum number of attempts to find a patch with enough positive pixels
+    positive_patch_fraction: 0.60
+    min_positive_pixels: 16
+    max_negative_pixels: 0
+    max_crop_attempts: 100       # maximum number of attempts to find a patch with enough positive pixels
     patches_per_image: 4
+
     eval_stride: 256            # Stride for sliding-window inference
     eval_batch_size: 4          # Batch size for sliding-window inference
     blend_mode: "gaussian"      # Blend mode for overlapping patches: "gaussian" | "linear" | "constant"
 
+    sanity_check_samples: 512   # Number of samples to use for sanity check during training
  
   image_size: 512
   num_workers: 6
@@ -73,6 +76,8 @@ train:
   amp: true                    # mixed precision: ~2x faster on Colab T4
   early_stopping_patience: 10
   resume: true
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
   # Cosine annealing with warm restarts (SGDR).
   scheduler:
     t_0: 10                     # epochs before the first restart

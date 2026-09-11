@@ -87,7 +87,7 @@ def rasterize_binary(
     annotation: dict,
     labels: list[str] | None = None,
     shape: tuple[int, int] | None = None,
-) -> np.ndarray:
+    ) -> np.ndarray:
     """Rasterise the union of `labels` into a single [H,W] uint8 mask.
 
     Defaults to the crack-like classes (Crack + ACrack).
@@ -106,7 +106,7 @@ def rasterize_multilabel(
     annotation: dict,
     classes: list[str] | None = None,
     shape: tuple[int, int] | None = None,
-) -> np.ndarray:
+    ) -> np.ndarray:
     """Rasterise all classes into a [C,H,W] uint8 stack (channels may overlap)."""
     classes = classes or DACL10K_CLASSES
     class_to_channel = {c: i for i, c in enumerate(classes)}
@@ -132,7 +132,7 @@ def present_labels(annotation: dict) -> set[str]:
 def sample_has_positive_mask(
     annotation_path: str | Path,
     labels: list[str] | None = None,
-) -> bool:
+    ) -> bool:
     """Return True when at least one non-degenerate target polygon is present."""
     labels = set(labels or CRACK_LIKE_DACL10K)
     annotation = load_annotation(annotation_path)
@@ -146,7 +146,7 @@ def sample_has_positive_mask(
 def binary_sample_targets(
     samples: list[tuple[Path, Path]],
     labels: list[str] | None = None,
-) -> list[int]:
+    ) -> list[int]:
     """Return image-level targets: 1 if Crack/ACrack is present, else 0."""
     return [int(sample_has_positive_mask(annotation_path, labels)) for _, annotation_path in samples]
 
@@ -171,12 +171,13 @@ def summarize_binary_targets(targets: list[int]) -> dict[str, float | int]:
 # --------------------------------------------------------------------------- #
 # P1-Patch Version
 # --------------------------------------------------------------------------- #
+
 def _pad_to_minimum_size(
     image: np.ndarray,
     mask: np.ndarray,
     patch_size: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Pad image and mask so that a patch_size square crop is always possible."""
+    ) -> tuple[np.ndarray, np.ndarray]:
+    """Pad aligned image/mask so a square native-resolution crop is always valid."""
     height, width = image.shape[:2]
     pad_bottom = max(patch_size - height, 0)
     pad_right = max(patch_size - width, 0)
@@ -210,8 +211,8 @@ def _crop_at(
     top: int,
     left: int,
     patch_size: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Extract aligned RGB and mask square patches."""
+    ) -> tuple[np.ndarray, np.ndarray]:
+    """Extract geometrically aligned RGB and binary-mask patches."""
     return (
         image[top : top + patch_size, left : left + patch_size],
         mask[top : top + patch_size, left : left + patch_size],
@@ -219,11 +220,19 @@ def _crop_at(
 
 
 class Dacl10kCrackPatchDataset(Dataset):
-    """Random native-resolution crack patches for P1-Patch Version training.
+    """Native-resolution training patches with guaranteed positive/negative ratio.
 
-    Every index refers to an image, but the same image can be sampled multiple
-    times per epoch. Each access independently draws either a positive patch
-    containing enough Crack/ACrack pixels or a random negative/background patch.
+    An index does not identify one fixed image. Instead, it identifies a desired
+    patch type:
+
+    - indices in the first positive_patch_count positions always return a patch
+      with at least min_positive_pixels Crack/ACrack pixels;
+    - remaining indices always return a patch with at most max_negative_pixels
+      Crack/ACrack pixels.
+
+    DataLoader(shuffle=True) randomizes the order of these pre-defined patch
+    types. Random image selection, crop coordinates and augmentation still make
+    samples different across accesses and epochs.
     """
 
     def __init__(
@@ -233,16 +242,19 @@ class Dacl10kCrackPatchDataset(Dataset):
         patch_size: int,
         positive_patch_fraction: float = 0.70,
         min_positive_pixels: int = 64,
+        max_negative_pixels: int = 0,
         max_crop_attempts: int = 30,
         patches_per_image: int = 4,
         labels: list[str] | None = None,
     ) -> None:
         if patch_size <= 0:
             raise ValueError("patch_size must be positive.")
-        if not 0.0 <= positive_patch_fraction <= 1.0:
-            raise ValueError("positive_patch_fraction must be in [0, 1].")
+        if not 0.0 < positive_patch_fraction < 1.0:
+            raise ValueError("positive_patch_fraction must be strictly in (0, 1).")
         if min_positive_pixels < 1:
             raise ValueError("min_positive_pixels must be >= 1.")
+        if max_negative_pixels < 0:
+            raise ValueError("max_negative_pixels must be >= 0.")
         if max_crop_attempts < 1:
             raise ValueError("max_crop_attempts must be >= 1.")
         if patches_per_image < 1:
@@ -253,22 +265,67 @@ class Dacl10kCrackPatchDataset(Dataset):
         self.patch_size = int(patch_size)
         self.positive_patch_fraction = float(positive_patch_fraction)
         self.min_positive_pixels = int(min_positive_pixels)
+        self.max_negative_pixels = int(max_negative_pixels)
         self.max_crop_attempts = int(max_crop_attempts)
         self.patches_per_image = int(patches_per_image)
         self.labels = labels or CRACK_LIKE_DACL10K
 
+        self.positive_sample_indices = self._find_positive_sample_indices()
+        self.negative_sample_indices = [
+            index for index in range(len(self.samples))
+            if index not in set(self.positive_sample_indices)
+        ]
+
+        if not self.positive_sample_indices:
+            raise RuntimeError(
+                "No DACL10K training image can produce a positive patch with at least "
+                f"{self.min_positive_pixels} Crack/ACrack pixels."
+            )
+        if not self.negative_sample_indices:
+            raise RuntimeError("No DACL10K training image is Crack/ACrack-negative.")
+
+        self.n_patches = len(self.samples) * self.patches_per_image
+        self.n_positive_patches = round(self.n_patches * self.positive_patch_fraction)
+        self.n_negative_patches = self.n_patches - self.n_positive_patches
+
+    def _find_positive_sample_indices(self) -> list[int]:
+        """Return images that can produce a valid positive patch.
+
+        A source image is eligible only if its full-resolution binary mask contains
+        at least min_positive_pixels Crack/ACrack pixels. This guarantees that a
+        512 × 512 crop can satisfy the same lower bound.
+        """
+        positive_indices = []
+
+        for index, (image_path, annotation_path) in enumerate(self.samples):
+            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if image is None:
+                raise RuntimeError(f"Unreadable image while indexing patches: {image_path}")
+
+            annotation = load_annotation(annotation_path)
+            mask = rasterize_binary(
+                annotation,
+                labels=self.labels,
+                shape=image.shape[:2],
+            )
+
+            if int(mask.sum()) >= self.min_positive_pixels:
+                positive_indices.append(index)
+
+        return positive_indices
+
     def __len__(self) -> int:
-        return len(self.samples) * self.patches_per_image
+        return self.n_patches
 
     def _load_sample(self, sample_index: int) -> tuple[np.ndarray, np.ndarray]:
-        image_path, ann_path = self.samples[sample_index]
+        image_path, annotation_path = self.samples[sample_index]
 
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError(f"Unreadable image: {image_path}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        annotation = load_annotation(ann_path)
+        annotation = load_annotation(annotation_path)
         mask = rasterize_binary(
             annotation,
             labels=self.labels,
@@ -291,19 +348,20 @@ class Dacl10kCrackPatchDataset(Dataset):
         self,
         image: np.ndarray,
         mask: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Try random crops until one contains enough annotated crack pixels."""
+        ) -> tuple[np.ndarray, np.ndarray]:
+        """Return a crop guaranteed to contain sufficient crack pixels."""
         for _ in range(self.max_crop_attempts):
             image_patch, mask_patch = self._random_crop(image, mask)
             if int(mask_patch.sum()) >= self.min_positive_pixels:
                 return image_patch, mask_patch
 
-        positive_y, positive_x = np.where(mask > 0)
-        if len(positive_y) == 0:
-            return self._random_crop(image, mask)
+        crack_y, crack_x = np.where(mask > 0)
+        if len(crack_y) == 0:
+            raise RuntimeError("Positive source image unexpectedly has an empty crack mask.")
 
-        anchor = np.random.randint(len(positive_y))
-        center_y, center_x = int(positive_y[anchor]), int(positive_x[anchor])
+        anchor_index = np.random.randint(len(crack_y))
+        center_y = int(crack_y[anchor_index])
+        center_x = int(crack_x[anchor_index])
 
         height, width = image.shape[:2]
         top_min = max(0, center_y - self.patch_size + 1)
@@ -313,23 +371,54 @@ class Dacl10kCrackPatchDataset(Dataset):
 
         top = np.random.randint(top_min, top_max + 1)
         left = np.random.randint(left_min, left_max + 1)
-        return _crop_at(image, mask, top, left, self.patch_size)
+        image_patch, mask_patch = _crop_at(image, mask, top, left, self.patch_size)
+
+        if int(mask_patch.sum()) < self.min_positive_pixels:
+            raise RuntimeError(
+                "Eligible positive source did not yield a valid positive patch. "
+                "Increase max_crop_attempts or inspect the crop-anchor logic."
+            )
+        return image_patch, mask_patch
+
+    def _negative_crop(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return a crop with no target crack pixels, whenever possible."""
+        for _ in range(self.max_crop_attempts):
+            image_patch, mask_patch = self._random_crop(image, mask)
+            if int(mask_patch.sum()) <= self.max_negative_pixels:
+                return image_patch, mask_patch
+
+        if int(mask.sum()) <= self.max_negative_pixels:
+            return self._random_crop(image, mask)
+
+        raise RuntimeError(
+            "Could not construct a negative patch from the selected image. "
+            "Increase max_crop_attempts or use crack-negative source images."
+        )
+
+    def _get_positive_patch(self) -> tuple[np.ndarray, np.ndarray]:
+        sample_index = int(np.random.choice(self.positive_sample_indices))
+        image, mask = self._load_sample(sample_index)
+        return self._positive_crop(image, mask)
+
+    def _get_negative_patch(self) -> tuple[np.ndarray, np.ndarray]:
+        sample_index = int(np.random.choice(self.negative_sample_indices))
+        image, mask = self._load_sample(sample_index)
+        return self._negative_crop(image, mask)
 
     def __getitem__(self, index: int):
-        sample_index = index % len(self.samples)
-        image, mask = self._load_sample(sample_index)
+        wants_positive = index < self.n_positive_patches
 
-        has_crack = bool(mask.any())
-        wants_positive = np.random.random() < self.positive_patch_fraction
-
-        if has_crack and wants_positive:
-            image_patch, mask_patch = self._positive_crop(image, mask)
+        if wants_positive:
+            image_patch, mask_patch = self._get_positive_patch()
         else:
-            image_patch, mask_patch = self._random_crop(image, mask)
+            image_patch, mask_patch = self._get_negative_patch()
 
         augmented = self.transform(image=image_patch, mask=mask_patch)
         return augmented["image"], augmented["mask"].unsqueeze(0).float()
-
 
 class Dacl10kCrackCenterPatchDataset(Dataset):
     """One deterministic center patch per image for training-time monitoring."""

@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 import torch
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LinearLR, SequentialLR
 from tqdm.auto import tqdm
 
 from .eval.metrics import SegmentationMetrics
@@ -123,12 +123,38 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
     # Warm restarts: the LR is annealed to eta_min over t_0 epochs, then reset;
     # each cycle is t_mult times longer. Helps escape the flat regions typical of
     # highly imbalanced dense tasks.
-    scheduler = CosineAnnealingWarmRestarts(
+    cosine_scheduler = CosineAnnealingWarmRestarts(
         optimizer,
         T_0=cfg.train.scheduler.t_0,
         T_mult=cfg.train.scheduler.t_mult,
         eta_min=cfg.train.scheduler.eta_min,
     )
+
+    warmup_epochs = int(cfg.train.get("warmup_epochs", 0))
+    warmup_start_factor = float(cfg.train.get("warmup_start_factor", 1.0))
+
+    if warmup_epochs > 0:
+        if not 0.0 < warmup_start_factor <= 1.0:
+            raise ValueError("train.warmup_start_factor must be in (0, 1].")
+
+        warmup_scheduler = LinearLR(
+            optimizer,
+            start_factor=warmup_start_factor,
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_epochs],
+        )
+        print(
+            f"[scheduler] linear warm-up for {warmup_epochs} epochs: "
+            f"{warmup_start_factor:.3f} × lr -> 1.000 × lr"
+        )
+    else:
+        scheduler = cosine_scheduler
+
     scaler = torch.amp.GradScaler(enabled=bool(cfg.train.amp) and device.type == "cuda")
 
     start_epoch, best_dice, epochs_without_improvement = 0, 0.0, 0

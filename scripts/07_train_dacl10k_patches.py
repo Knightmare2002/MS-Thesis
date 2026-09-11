@@ -32,6 +32,8 @@ from pathlib import Path
 
 import matplotlib
 
+import numpy as np
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -90,6 +92,53 @@ def plot_curves(history_path: Path, out_path: Path) -> None:
     plt.close(fig)
 
 
+def patch_sampling_sanity_check(
+    dataset,
+    n_samples: int,
+    min_positive_pixels: int,
+) -> dict:
+    """Measure patch composition on indices sampled across the whole dataset."""
+    n_samples = min(int(n_samples), len(dataset))
+
+    # Equally spaced indices cover both the positive and negative index ranges.
+    indices = np.linspace(
+        0,
+        len(dataset) - 1,
+        num=n_samples,
+        dtype=int,
+    )
+
+    crack_pixels = []
+    positive_patches = 0
+    negative_patches = 0
+    intermediate_patches = 0
+
+    for index in indices:
+        _, mask = dataset[int(index)]
+        n_crack_pixels = int(mask.sum().item())
+        crack_pixels.append(n_crack_pixels)
+
+        if n_crack_pixels >= min_positive_pixels:
+            positive_patches += 1
+        elif n_crack_pixels == 0:
+            negative_patches += 1
+        else:
+            intermediate_patches += 1
+
+    return {
+        "n_samples": n_samples,
+        "positive_patches": positive_patches,
+        "negative_patches": negative_patches,
+        "intermediate_patches": intermediate_patches,
+        "positive_fraction_observed": positive_patches / n_samples,
+        "negative_fraction_observed": negative_patches / n_samples,
+        "intermediate_fraction_observed": intermediate_patches / n_samples,
+        "mean_crack_pixels": sum(crack_pixels) / n_samples,
+        "min_crack_pixels": min(crack_pixels),
+        "max_crack_pixels": max(crack_pixels),
+    }
+
+
 def make_validation_dataset(samples, cfg, labels):
     """Create one deterministic center patch per validation image."""
     return Dacl10kCrackCenterPatchDataset(
@@ -126,6 +175,49 @@ def main() -> None:
     train_summary = summarize_binary_targets(binary_sample_targets(train_samples, labels))
     val_summary = summarize_binary_targets(binary_sample_targets(val_samples, labels))
 
+    print(
+            f"[data] train images {train_summary['n_images']} | "
+            f"val images {val_summary['n_images']} | "
+            f"patch size {cfg.data.p1_patch.patch_size} | "
+            f"train patches/epoch {len(train_samples) * cfg.data.p1_patch.patches_per_image}"
+        )
+    
+    train_ds = Dacl10kCrackPatchDataset(
+        samples=train_samples,
+        transform=patch_train_transform(),
+        patch_size=cfg.data.p1_patch.patch_size,
+        positive_patch_fraction=cfg.data.p1_patch.positive_patch_fraction,
+        min_positive_pixels=cfg.data.p1_patch.min_positive_pixels,
+        max_negative_pixels=cfg.data.p1_patch.max_negative_pixels,
+        max_crop_attempts=cfg.data.p1_patch.max_crop_attempts,
+        patches_per_image=cfg.data.p1_patch.patches_per_image,
+        labels=labels,
+    )
+    val_ds = make_validation_dataset(val_samples, cfg, labels)
+
+    sampling_check = patch_sampling_sanity_check(
+        dataset=train_ds,
+        n_samples=cfg.data.p1_patch.sanity_check_samples,
+        min_positive_pixels=cfg.data.p1_patch.min_positive_pixels,
+    )
+    print(
+        f"[sampling] positive patches "
+        f"{sampling_check['positive_fraction_observed']:.1%} | "
+        f"negative patches "
+        f"{sampling_check['negative_fraction_observed']:.1%} | "
+        f"intermediate patches "
+        f"{sampling_check['intermediate_fraction_observed']:.1%} | "
+        f"mean crack pixels {sampling_check['mean_crack_pixels']:.1f}"
+    )
+
+    expected_positive = float(cfg.data.p1_patch.positive_patch_fraction)
+    observed_positive = sampling_check["positive_fraction_observed"]
+    if abs(observed_positive - expected_positive) > 0.03:
+        raise RuntimeError(
+            f"Patch sampling check failed: expected about {expected_positive:.1%} "
+            f"positive patches but observed {observed_positive:.1%}."
+        )
+
     summary = {
         "task": str(cfg.data.p1_patch.task_name),
         "target_labels": labels,
@@ -138,8 +230,10 @@ def main() -> None:
             "patches_per_image": int(cfg.data.p1_patch.patches_per_image),
             "positive_patch_fraction": float(cfg.data.p1_patch.positive_patch_fraction),
             "min_positive_pixels": int(cfg.data.p1_patch.min_positive_pixels),
+            "max_negative_pixels": int(cfg.data.p1_patch.max_negative_pixels),
             "max_crop_attempts": int(cfg.data.p1_patch.max_crop_attempts),
         },
+        "sampling_sanity_check": sampling_check,
         "validation_note": (
             "Training-time validation uses one random-free normalized patch per image "
             "only as an optimization monitor. Full-image metrics require sliding-window "
@@ -149,24 +243,6 @@ def main() -> None:
     with open(run_dir / "dataset_summary.json", "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
 
-    print(
-        f"[data] train images {train_summary['n_images']} | "
-        f"val images {val_summary['n_images']} | "
-        f"patch size {cfg.data.p1_patch.patch_size} | "
-        f"train patches/epoch {len(train_samples) * cfg.data.p1_patch.patches_per_image}"
-    )
-
-    train_ds = Dacl10kCrackPatchDataset(
-        samples=train_samples,
-        transform=patch_train_transform(),
-        patch_size=cfg.data.p1_patch.patch_size,
-        positive_patch_fraction=cfg.data.p1_patch.positive_patch_fraction,
-        min_positive_pixels=cfg.data.p1_patch.min_positive_pixels,
-        max_crop_attempts=cfg.data.p1_patch.max_crop_attempts,
-        patches_per_image=cfg.data.p1_patch.patches_per_image,
-        labels=labels,
-    )
-    val_ds = make_validation_dataset(val_samples, cfg, labels)
 
     common = loader_kwargs(cfg.data, device)
     train_loader = DataLoader(
