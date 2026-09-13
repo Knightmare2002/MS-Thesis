@@ -194,9 +194,7 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
             f"| IoU {val_metrics['iou']:.4f} | Dice {val_metrics['dice']:.4f} "
             f"| P {val_metrics['precision']:.3f} R {val_metrics['recall']:.3f}"
         )
-
-        save_checkpoint(last_path, model, optimizer, scheduler, scaler, epoch, best_dice, epochs_without_improvement)
-        
+       
         improved = val_metrics["dice"] > best_dice
         if improved:
             best_dice, best_metrics, epochs_without_improvement = val_metrics["dice"], val_metrics, 0

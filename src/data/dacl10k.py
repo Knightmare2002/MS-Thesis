@@ -348,7 +348,7 @@ class Dacl10kCrackPatchDataset(Dataset):
             if gt_pixels < 0:
                 raise ValueError(
                     "Hard-negative entry has no gt_positive_pixels field. "
-                    "Regenerate the pool with scripts/08_mine_hard_negatives.py."
+                    "Regenerate the pool with scripts/09_mine_hard_negatives.py."
                 )
             if gt_pixels > self.max_negative_pixels:
                 continue
@@ -452,11 +452,23 @@ class Dacl10kCrackPatchDataset(Dataset):
         self,
         image: np.ndarray,
         mask: np.ndarray,
-        ) -> tuple[np.ndarray, np.ndarray]:
-            """Return a crop with no target crack pixels, whenever possible."""
-            # Best effort: return the cleanest crop seen instead of aborting training.
-            candidates = [self._random_crop(image, mask) for _ in range(self.max_crop_attempts)]
-            return min(candidates, key=lambda pair: int(pair[1].sum()))
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return a crop with no target crack pixels, whenever possible.
+
+        Streaming best effort: materialising all max_crop_attempts crops at once
+        costs ~1.8 MB each and defeats the point of an early exit.
+        """
+        best_patch, best_pixels = None, None
+
+        for _ in range(self.max_crop_attempts):
+            image_patch, mask_patch = self._random_crop(image, mask)
+            n_positive = int(mask_patch.sum())
+            if n_positive <= self.max_negative_pixels:
+                return image_patch, mask_patch
+            if best_pixels is None or n_positive < best_pixels:
+                best_patch, best_pixels = (image_patch, mask_patch), n_positive
+
+        return best_patch
 
     def _get_positive_patch(self) -> tuple[np.ndarray, np.ndarray]:
         sample_index = int(np.random.choice(self.positive_sample_indices))
@@ -512,10 +524,11 @@ class Dacl10kCrackPatchDataset(Dataset):
         )
 
         if int(mask_patch.sum()) > self.max_negative_pixels:
-            raise RuntimeError(
-                "Invalid hard-negative crop: it contains Crack/ACrack pixels. "
-                "Check the pool, patch coordinates, patch size and crack labels."
+            print(
+                f"[patch-dataset] WARNING: mined hard negative at ({left},{top}) of "
+                f"{image_path.name} contains crack pixels, falling back to a random negative."
             )
+            return self._get_negative_patch()
 
         return image_patch, mask_patch
 

@@ -277,19 +277,26 @@ def main() -> None:
             "max_negative_pixels": int(cfg.data.p1_patch.max_negative_pixels),
             "max_crop_attempts": int(cfg.data.p1_patch.max_crop_attempts),
         },
+        
         "hard_negative_mining": {
             "enabled": bool(hnm_cfg.enabled),
+
             "source_checkpoint": (
-                str(hnm_cfg.source_checkpoint) if bool(hnm_cfg.enabled) else None
+                str(hnm_cfg.source_checkpoint)
+                if bool(hnm_cfg.enabled)
+                else None
             ),
             "pool_path": (
-                str(hnm_cfg.pool_path) if bool(hnm_cfg.enabled) else None
+                str(hnm_cfg.pool_path)
+                if bool(hnm_cfg.enabled)
+                else None
             ),
             "pool_size": (
                 int(len(train_ds.hard_negative_pool))
                 if bool(hnm_cfg.enabled)
                 else 0
             ),
+
             "hard_negative_fraction_among_negative": (
                 float(hnm_cfg.hard_negative_fraction)
                 if bool(hnm_cfg.enabled)
@@ -305,14 +312,29 @@ def main() -> None:
                 if bool(hnm_cfg.enabled)
                 else int(train_ds.n_negative_patches)
             ),
+
             "candidate_stride": (
-                int(hnm_cfg.candidate_stride) if bool(hnm_cfg.enabled) else None
+                int(hnm_cfg.candidate_stride)
+                if bool(hnm_cfg.enabled)
+                else None
             ),
             "top_k_per_image": (
-                int(hnm_cfg.top_k_per_image) if bool(hnm_cfg.enabled) else None
+                int(hnm_cfg.top_k_per_image)
+                if bool(hnm_cfg.enabled)
+                else None
             ),
-            "min_mean_probability": (
-                float(hnm_cfg.min_mean_probability)
+            "max_window_overlap": (
+                float(hnm_cfg.max_window_overlap)
+                if bool(hnm_cfg.enabled)
+                else None
+            ),
+            "probability_threshold": (
+                float(hnm_cfg.probability_threshold)
+                if bool(hnm_cfg.enabled)
+                else None
+            ),
+            "min_predicted_fraction": (
+                float(hnm_cfg.min_predicted_fraction)
                 if bool(hnm_cfg.enabled)
                 else None
             ),
@@ -321,7 +343,18 @@ def main() -> None:
                 if bool(hnm_cfg.enabled)
                 else None
             ),
+            "refresh_each_epoch": (
+                bool(hnm_cfg.refresh_each_epoch)
+                if bool(hnm_cfg.enabled)
+                else None
+            ),
+            "seed": (
+                int(hnm_cfg.seed)
+                if bool(hnm_cfg.enabled)
+                else None
+            ),
         },
+
         "sampling_sanity_check": sampling_check,
         "validation_note": (
             "Training-time validation uses one random-free normalized patch per image "

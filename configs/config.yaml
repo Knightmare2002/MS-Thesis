@@ -49,14 +49,15 @@ data:
     sanity_check_samples: 512   # Number of samples to use for sanity check during training
  
   hard_negative_mining:
-    enabled: false
-    source_checkpoint: "outputs/runs/p1_patch_glb_positive_quota_sampling_7060_posw2to5/best.pt"
-    pool_path: "outputs/runs/p1_patch_glb_positive_quota_sampling_7060_posw2to5/hard_negative_pool_train.json"
+    enabled: true
+    source_checkpoint: "outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/best.pt"
+    pool_path: "outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/hard_negative_pool_train.json"
     candidate_stride: 256
     top_k_per_image: 3
+    max_window_overlap: 0.25
 
     probability_threshold: 0.50
-    min_mean_probability: 0.05
+    min_predicted_fraction: 0.002
     
     hard_negative_fraction: 0.50
 

@@ -91,6 +91,13 @@ def get_device(verbose: bool = True) -> "torch.device":  # type: ignore[name-def
         print(f"[device] {properties.name} | {properties.total_memory / 1024**3:.1f} GB VRAM")
     return torch.device("cuda")
 
+def _seed_worker(worker_id: int) -> None:
+    """Seed NumPy and Python random inside each DataLoader worker."""
+    import torch
+
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 def loader_kwargs(data_cfg, device) -> dict:
     """DataLoader options shared by training and evaluation.
@@ -103,6 +110,7 @@ def loader_kwargs(data_cfg, device) -> dict:
     if num_workers > 0:
         kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", False))
         kwargs["prefetch_factor"] = int(data_cfg.get("prefetch_factor", 2))
+        kwargs["worker_init_fn"] = _seed_worker
     return kwargs
 
 
