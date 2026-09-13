@@ -37,17 +37,34 @@ data:
     task_name: "dacl10k_crack_patch_glb_positive_quota"
     patch_size: 512
     positive_patch_fraction: 0.60
-    min_positive_pixels: 16
+    min_positive_pixels: 256
     max_negative_pixels: 0
     max_crop_attempts: 100       # maximum number of attempts to find a patch with enough positive pixels
     patches_per_image: 4
 
     eval_stride: 256            # Stride for sliding-window inference
     eval_batch_size: 4          # Batch size for sliding-window inference
-    blend_mode: "gaussian"      # Blend mode for overlapping patches: "gaussian" | "linear" | "constant"
+    blend_mode: "gaussian"      # Blend mode for overlapping patches: "gaussian" | "uniform"
 
     sanity_check_samples: 512   # Number of samples to use for sanity check during training
  
+  hard_negative_mining:
+    enabled: false
+    source_checkpoint: "outputs/runs/p1_patch_glb_positive_quota_sampling_7060_posw2to5/best.pt"
+    pool_path: "outputs/runs/p1_patch_glb_positive_quota_sampling_7060_posw2to5/hard_negative_pool_train.json"
+    candidate_stride: 256
+    top_k_per_image: 3
+
+    probability_threshold: 0.50
+    min_mean_probability: 0.05
+    
+    hard_negative_fraction: 0.50
+
+    negative_images_only: true
+
+    refresh_each_epoch: false
+    seed: 42
+
   image_size: 512
   num_workers: 6
   persistent_workers: true
@@ -65,7 +82,7 @@ loss:
   bce_weight: 0.5
   dice_weight: 0.5
   # >1.0 up-weights the (rare) crack pixels inside the BCE term.
-  pos_weight: 2.0
+  pos_weight: 5.0
 
 train:
   epochs: 30
@@ -86,6 +103,6 @@ train:
 
 eval:
   # Threshold applied to sigmoid(logits).
-  threshold: 0.5
+  threshold: 0.7
   threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7]
   n_qualitative_samples: 6

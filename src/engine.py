@@ -76,7 +76,7 @@ def evaluate(model, loader, criterion, device, threshold: float = 0.5) -> dict[s
 # --------------------------------------------------------------------------- #
 # Checkpointing
 # --------------------------------------------------------------------------- #
-def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int, best_dice: float) -> None:
+def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int, best_dice: float, epochs_without_improvement: int = 0) -> None:
     """Persist everything needed to resume training bit-for-bit."""
     torch.save(
         {
@@ -86,6 +86,7 @@ def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
+            "epochs_without_improvement": epochs_without_improvement,
         },
         path,
     )
@@ -157,16 +158,18 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
 
     scaler = torch.amp.GradScaler(enabled=bool(cfg.train.amp) and device.type == "cuda")
 
-    start_epoch, best_dice, epochs_without_improvement = 0, 0.0, 0
+    start_epoch, best_dice, epochs_without_improvement = 0, -1.0, 0
     if cfg.train.get("resume") and last_path.exists():
         checkpoint = load_checkpoint(last_path, model, optimizer, scheduler, scaler, device)
         start_epoch, best_dice = checkpoint["epoch"] + 1, checkpoint["best_dice"]
+        epochs_without_improvement = checkpoint.get("epochs_without_improvement", 0)
         print(f"[fit] resumed from {last_path} at epoch {start_epoch} (best dice {best_dice:.4f})")
 
     best_metrics: dict[str, float] = {}
 
     for epoch in range(start_epoch, cfg.train.epochs):
         started = time.time()
+        current_lr = optimizer.param_groups[0]["lr"]
         train_loss = train_one_epoch(
             model, train_loader, criterion, optimizer, scaler, device,
             accumulation_steps=cfg.train.accumulation_steps,
@@ -176,7 +179,7 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
 
         row = {
             "epoch": epoch,
-            "lr": optimizer.param_groups[0]["lr"],
+            "lr": current_lr,
             "train_loss": train_loss,
             "val_loss": val_metrics["loss"],
             "val_iou": val_metrics["iou"],
@@ -192,16 +195,23 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
             f"| P {val_metrics['precision']:.3f} R {val_metrics['recall']:.3f}"
         )
 
-        save_checkpoint(last_path, model, optimizer, scheduler, scaler, epoch, best_dice)
-        if val_metrics["dice"] > best_dice:
+        save_checkpoint(last_path, model, optimizer, scheduler, scaler, epoch, best_dice, epochs_without_improvement)
+        
+        improved = val_metrics["dice"] > best_dice
+        if improved:
             best_dice, best_metrics, epochs_without_improvement = val_metrics["dice"], val_metrics, 0
-            save_checkpoint(best_path, model, optimizer, scheduler, scaler, epoch, best_dice)
-            print(f"  -> new best Dice {best_dice:.4f}, saved {best_path.name}")
         else:
             epochs_without_improvement += 1
-            if epochs_without_improvement >= cfg.train.early_stopping_patience:
-                print(f"[fit] early stopping after {epochs_without_improvement} epochs without improvement")
-                break
+
+        save_checkpoint(last_path, model, optimizer, scheduler, scaler, epoch, best_dice,
+                        epochs_without_improvement)
+        if improved:
+            save_checkpoint(best_path, model, optimizer, scheduler, scaler, epoch, best_dice,
+                            epochs_without_improvement)
+            print(f"  -> new best Dice {best_dice:.4f}, saved {best_path.name}")
+        elif epochs_without_improvement >= cfg.train.early_stopping_patience:
+            print(f"[fit] early stopping after {epochs_without_improvement} epochs without improvement")
+            break
 
     return best_metrics
 

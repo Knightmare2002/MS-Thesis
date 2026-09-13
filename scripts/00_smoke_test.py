@@ -59,17 +59,19 @@ def make_fake_dacl10k(root: Path, n: int = 6, size: int = 128) -> None:
                 str(images_dir / f"{name}.jpg"),
                 rng.integers(50, 200, size=(size, size, 3), dtype=np.uint8),
             )
+            # Half of the images are deliberately crack-free: the patch dataset
+            # needs both positive and negative sources to satisfy its quota.
+            shapes = [{"label": "Rust", "shape_type": "polygon",
+                       "points": [[70, 70], [110, 72], [108, 110], [72, 108]]}]
+            if i % 2 == 0:
+                shapes.insert(0, {"label": "Crack", "shape_type": "polygon",
+                                  "points": [[10, 10], [60, 12], [62, 20], [12, 18]]})
             annotation = {
                 "imageName": f"{name}.jpg",
                 "imageWidth": size,
                 "imageHeight": size,
                 "split": split,
-                "shapes": [
-                    {"label": "Crack", "shape_type": "polygon",
-                     "points": [[10, 10], [60, 12], [62, 20], [12, 18]]},
-                    {"label": "Rust", "shape_type": "polygon",
-                     "points": [[70, 70], [110, 72], [108, 110], [72, 108]]},
-                ],
+                "shapes": shapes,
             }
             (ann_dir / f"{name}.json").write_text(json.dumps(annotation), encoding="utf-8")
 
@@ -83,8 +85,16 @@ def build_config(tmp: Path) -> Path:
     cfg["data"]["dacl10k"]["root"] = str(tmp / "dacl10k")
     cfg["data"]["image_size"] = 64
     cfg["data"]["num_workers"] = 0
+    cfg["data"]["p1_patch"].update({
+    "patch_size": 64,
+    "min_positive_pixels": 8,
+    "patches_per_image": 2,
+    "eval_stride": 32,          # forces genuine overlap, so blending is exercised
+    "eval_batch_size": 2,
+    "sanity_check_samples": 8,
+    })
     cfg["model"]["encoder_weights"] = None  # no download in the smoke test
-    cfg["train"].update({"epochs": 1, "batch_size": 2, "amp": False, "resume": False})
+    cfg["train"].update({"epochs": 3, "batch_size": 2, "amp": False, "resume": False, "warmup_epochs": 1, "early_stopping_patience":99,})
     cfg["train"]["scheduler"]["t_0"] = 1
     cfg["eval"]["n_qualitative_samples"] = 2
 
@@ -106,10 +116,13 @@ def main() -> None:
         make_fake_dacl10k(tmp / "dacl10k")
         config = build_config(tmp)
         run_dir = tmp / "outputs" / "runs" / "smoke"
+        patch_run_dir = tmp / "outputs" / "runs" / "smoke_patch"
 
         run([sys.executable, "scripts/01_eda.py", "--config", str(config)])
         run([sys.executable, "scripts/02_train_unet.py", "--config", str(config), "--run-name", "smoke"])
         run([sys.executable, "scripts/03_evaluate.py", "--run-dir", str(run_dir), "--cross-dataset"])
+        run([sys.executable, "scripts/07_train_dacl10k_patches.py", "--config", str(config), "--run-name", "smoke_patch"])
+        run([sys.executable, "scripts/08_evaluate_dacl10k_sliding.py", "--run-dir", str(patch_run_dir)])
 
         print("\nSMOKE TEST PASSED - pipeline is consistent end to end.")
 

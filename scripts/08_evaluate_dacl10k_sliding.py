@@ -82,11 +82,6 @@ def tensor_for_metric(array: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(array).unsqueeze(0).unsqueeze(0)
 
 
-def denormalized_display(image: np.ndarray) -> np.ndarray:
-    """Input is already RGB uint8; this helper documents display semantics."""
-    return image.copy()
-
-
 def select_qualitative_indices(targets: list[int], n_samples: int) -> list[int]:
     """Select a balanced deterministic set of positive and negative examples."""
     positives = [index for index, target in enumerate(targets) if target == 1]
@@ -131,9 +126,10 @@ def save_qualitative_figure(
 
         prediction = probability > threshold
         ground_truth = mask > 0.5
-        overlay = denormalized_display(image)
-        overlay[prediction] = [255, 0, 0]
-        overlay[ground_truth] = [0, 255, 0]
+        overlay = image.copy()
+        overlay[prediction & ~ground_truth] = [255, 0, 0]
+        overlay[ground_truth & ~prediction] = [0, 255, 0]
+        overlay[ground_truth & prediction] = [255, 255, 0]
 
         contents = [
             (image, "image", None),
@@ -200,7 +196,38 @@ def main() -> None:
     composition = summarize_binary_targets(targets)
 
     model = build_model(cfg.model).to(device)
-    load_checkpoint(run_dir / args.checkpoint, model, device=device)
+
+    checkpoint_path = run_dir / args.checkpoint
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = load_checkpoint(
+        checkpoint_path,
+        model,
+        device=device,
+    )
+
+    checkpoint_epoch = checkpoint.get("epoch", "unknown")
+    checkpoint_best_dice = checkpoint.get("best_dice", None)
+
+    print("\n=== Checkpoint used for sliding-window evaluation ===")
+    print(f"checkpoint path : {checkpoint_path.resolve()}")
+    print(f"checkpoint file : {checkpoint_path.name}")
+    print(f"saved epoch     : {checkpoint_epoch}")
+
+    if checkpoint_best_dice is not None:
+        print(f"best val Dice   : {float(checkpoint_best_dice):.4f}")
+
+    if checkpoint_path.name == "best.pt":
+        print("checkpoint type : BEST")
+    else:
+        print("checkpoint type : LAST / custom")
+        print(
+            "[warning] This is not best.pt. Do not use these metrics as the "
+            "official final result unless this choice is intentional."
+        )
+
+    print("====================================================\n")
 
     print(
         f"[eval] DACL10K {cfg.data.dacl10k.val_split}: {composition['n_images']} images | "
@@ -214,6 +241,15 @@ def main() -> None:
     results.insert(2, "patch_size", int(cfg.data.p1_patch.patch_size))
     results.insert(3, "stride", int(cfg.data.p1_patch.eval_stride))
     results.insert(4, "blend_mode", str(cfg.data.p1_patch.blend_mode))
+    results.insert(5, "checkpoint_name", checkpoint_path.name)
+    results.insert(6, "checkpoint_epoch", checkpoint_epoch)
+    results.insert(
+        7,
+        "checkpoint_best_val_dice",
+        float(checkpoint_best_dice)
+        if checkpoint_best_dice is not None
+        else float("nan"),
+    )
 
     eval_dir = ensure_dir(run_dir / "eval_sliding")
     results.to_csv(eval_dir / "metrics_dacl10k_val_sliding.csv", index=False)
@@ -228,6 +264,20 @@ def main() -> None:
                     "stride": int(cfg.data.p1_patch.eval_stride),
                     "batch_size": int(cfg.data.p1_patch.eval_batch_size),
                     "blend_mode": str(cfg.data.p1_patch.blend_mode),
+                },
+                "checkpoint": {
+                    "path": str(checkpoint_path),
+                    "name": checkpoint_path.name,
+                    "epoch": (
+                        int(checkpoint_epoch)
+                        if checkpoint_epoch != "unknown"
+                        else None
+                    ),
+                    "best_val_dice": (
+                        float(checkpoint_best_dice)
+                        if checkpoint_best_dice is not None
+                        else None
+                    ),
                 },
                 **composition,
             },

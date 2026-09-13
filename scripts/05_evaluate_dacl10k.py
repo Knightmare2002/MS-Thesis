@@ -29,12 +29,16 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+import cv2
+import torch.nn.functional as F
+
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.data.dacl10k import (
     Dacl10kCrackDataset,
     binary_sample_targets,
     list_samples,
+    rasterize_binary,
     summarize_binary_targets,
 )
 from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD, eval_transform
@@ -49,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", required=True, help="directory containing config.yaml and best.pt")
     parser.add_argument("--checkpoint", default="best.pt")
     parser.add_argument("--limit", type=int, default=None, help="evaluate only N validation images")
+    parser.add_argument("--native", action="store_true", help="score predictions on the original image resolution")
     return parser.parse_args()
 
 
@@ -67,6 +72,80 @@ def evaluate_with_sweep(model, loader, device, thresholds: list[float]) -> pd.Da
             meter.update(logits, masks)
 
     rows = [{"threshold": threshold, **meter.compute()} for threshold, meter in meters.items()]
+    return pd.DataFrame(rows).sort_values("threshold").reset_index(drop=True)
+
+@torch.no_grad()
+def predict_resize_native(model, image, device, image_size, mean, std):
+    """P1-A prediction scored on the native pixel grid: resize -> predict -> upsample.
+
+    Required for a fair P1-A vs P1-B comparison: scoring P1-A against a 512x512
+    downsampled mask alters the ground truth, so the two Dice values otherwise
+    measure different tasks.
+    """
+    resized = cv2.resize(image, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
+    tensor = torch.from_numpy(resized.transpose(2, 0, 1)).float() / 255.0
+    tensor = (tensor - torch.tensor(mean).view(3, 1, 1)) / torch.tensor(std).view(3, 1, 1)
+
+    probability = torch.sigmoid(model(tensor.unsqueeze(0).to(device)))
+    probability = F.interpolate(
+        probability, size=image.shape[:2], mode="bilinear", align_corners=False
+    )
+    return probability[0, 0].cpu()
+
+@torch.no_grad()
+def evaluate_native_with_sweep(
+    model,
+    samples,
+    labels: list[str],
+    device,
+    image_size: int,
+    thresholds: list[float],
+) -> pd.DataFrame:
+    """Evaluate P1-A predictions against masks at original HxW resolution."""
+    model.eval()
+    meters = {
+        threshold: SegmentationMetrics(threshold=threshold)
+        for threshold in thresholds
+    }
+
+    for image_path, ann_path in samples:
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"Unreadable image: {image_path}")
+
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        with open(ann_path, "r", encoding="utf-8") as fh:
+            annotation = json.load(fh)
+
+        mask = rasterize_binary(
+            annotation,
+            labels=labels,
+            shape=image.shape[:2],
+        ).astype(np.float32)
+
+        probability = predict_resize_native(
+            model=model,
+            image=image,
+            device=device,
+            image_size=image_size,
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+        )
+
+        logits_native = torch.logit(
+            probability.clamp(1e-6, 1.0 - 1e-6)
+        ).unsqueeze(0).unsqueeze(0)
+
+        mask_native = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0)
+
+        for meter in meters.values():
+            meter.update(logits_native, mask_native)
+
+    rows = [
+        {"threshold": threshold, **meter.compute()}
+        for threshold, meter in meters.items()
+    ]
     return pd.DataFrame(rows).sort_values("threshold").reset_index(drop=True)
 
 
@@ -150,23 +229,41 @@ def main() -> None:
     targets = binary_sample_targets(samples, labels)
     split_summary = summarize_binary_targets(targets)
 
-    dataset = Dacl10kCrackDataset(
-        samples,
-        eval_transform(cfg.data.image_size),
-        labels=labels,
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=cfg.train.batch_size,
-        shuffle=False,
-        **loader_kwargs(cfg.data, device),
-    )
+    dataset = None
+    loader = None
+
+    if not args.native:
+        dataset = Dacl10kCrackDataset(
+            samples,
+            eval_transform(cfg.data.image_size),
+            labels=labels,
+        )
+        loader = DataLoader(
+            dataset,
+            batch_size=cfg.train.batch_size,
+            shuffle=False,
+            **loader_kwargs(cfg.data, device),
+        )
 
     model = build_model(cfg.model).to(device)
     load_checkpoint(run_dir / args.checkpoint, model, device=device)
 
     thresholds = list(cfg.eval.threshold_sweep)
-    results = evaluate_with_sweep(model, loader, device, thresholds)
+
+    if args.native:
+        print("[eval] Native mode: scoring predictions against original HxW DACL10K masks.")
+        results = evaluate_native_with_sweep(
+            model=model,
+            samples=samples,
+            labels=labels,
+            device=device,
+            image_size=int(cfg.data.image_size),
+            thresholds=thresholds,
+        )
+    else:
+        print(f"[eval] Resized mode: scoring predictions and masks at {cfg.data.image_size}x{cfg.data.image_size}.")
+        results = evaluate_with_sweep(model, loader, device, thresholds)
+
     results.insert(0, "dataset", f"dacl10k_{cfg.data.dacl10k.val_split}")
     results.insert(1, "target", "+".join(labels))
 
@@ -178,7 +275,12 @@ def main() -> None:
     print(results[["threshold", "iou", "dice", "precision", "recall", "false_alarm_rate_empty_gt"]].to_string(index=False))
 
     eval_dir = ensure_dir(run_dir / "eval")
-    results.to_csv(eval_dir / "metrics_dacl10k_val.csv", index=False)
+    metrics_name = (
+        "metrics_dacl10k_val_native.csv"
+        if args.native
+        else "metrics_dacl10k_val_512.csv"
+    )
+    results.to_csv(eval_dir / metrics_name, index=False)
 
     with open(eval_dir / "validation_composition.json", "w", encoding="utf-8") as fh:
         json.dump(
@@ -191,15 +293,18 @@ def main() -> None:
             indent=2,
         )
 
-    qualitative_grid(
-        model=model,
-        dataset=dataset,
-        targets=targets,
-        device=device,
-        threshold=float(cfg.eval.threshold),
-        n_samples=int(cfg.eval.n_qualitative_samples),
-        out_path=eval_dir / "qualitative_dacl10k_val.png",
-    )
+    if args.native:
+        print("[eval] Skipping qualitative grid: it is implemented only for 512x512 evaluation.")
+    else:
+        qualitative_grid(
+            model=model,
+            dataset=dataset,
+            targets=targets,
+            device=device,
+            threshold=float(cfg.eval.threshold),
+            n_samples=int(cfg.eval.n_qualitative_samples),
+            out_path=eval_dir / "qualitative_dacl10k_val_512.png",
+        )
 
     print(f"\nEvaluation artifacts in {eval_dir.resolve()}")
 

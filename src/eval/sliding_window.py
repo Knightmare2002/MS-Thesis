@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -71,8 +69,7 @@ def predict_sliding_window(
 ) -> torch.Tensor:
     """Return a full-resolution crack-probability map [H,W].
 
-    The input image is never globally resized. Patches are padded only when an
-    image side is smaller than patch_size, inferred in batches, then fused using
+    The input image is never globally resized. Patches are padded only when an image side is smaller than patch_size, inferred in batches, then fused using
     weighted averaging in all overlapping regions.
     """
     if image.ndim != 3 or image.shape[2] != 3:
