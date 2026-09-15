@@ -72,18 +72,25 @@ data:
   prefetch_factor: 4
 
 model:
-  arch: "unet"                 # unet | unetplusplus | deeplabv3plus
+  arch: "deeplabv3plus"        # unet | unetplusplus | deeplabv3plus
   encoder: "resnet34"          # smp encoder name
   encoder_weights: "imagenet"  # null to train from scratch
   in_channels: 3
   classes: 1                   # binary crack segmentation
 
 loss:
-  # Total loss = bce_weight * BCEWithLogits + dice_weight * SoftDice
+  # - "bce_dice": Weighted BCEWithLogits + Soft Dice
+  # - "focal_dice": Focal BCE + Soft Dice
+
+  name: "bce_dice"
+
   bce_weight: 0.5
   dice_weight: 0.5
-  # >1.0 up-weights the (rare) crack pixels inside the BCE term.
   pos_weight: 5.0
+
+  focal_weight: 0.5
+  focal_alpha: 0.833
+  focal_gamma: 2.0
 
 train:
   epochs: 30
