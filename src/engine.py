@@ -187,10 +187,21 @@ def initialize_model_from_checkpoint(
         "initialized_model_sha256": state_dict_sha256(model.state_dict()),
     }
 
-    if metadata["source_model_sha256"] != metadata["initialized_model_sha256"]:
+    # Fingerprint BEFORE loading: this is what makes the check meaningful.
+    factory_sha256 = state_dict_sha256(model.state_dict())
+
+    incompatible = model.load_state_dict(source_state_dict, strict=strict)
+
+    if metadata["initialized_model_sha256"] == factory_sha256:
         raise RuntimeError(
-            "[transfer] loaded model fingerprint differs from the source state_dict. "
-            "This should not happen with strict full-model initialization."
+            "[transfer] model weights are unchanged after loading: "
+            "the checkpoint did not overwrite the factory initialization."
+        )
+
+    if strict and metadata["source_model_sha256"] != metadata["initialized_model_sha256"]:
+        raise RuntimeError(
+            "[transfer] loaded model fingerprint differs from the source state_dict "
+            "under strict loading."
         )
 
     print(
