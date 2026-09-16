@@ -18,6 +18,9 @@ import torch
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LinearLR, SequentialLR
 from tqdm.auto import tqdm
 
+import hashlib
+from typing import Any
+
 from .eval.metrics import SegmentationMetrics
 from .utils import ensure_dir
 
@@ -104,6 +107,107 @@ def load_checkpoint(path: Path, model, optimizer=None, scheduler=None, scaler=No
         scaler.load_state_dict(checkpoint["scaler"])
     return checkpoint
 
+
+def state_dict_sha256(state_dict: dict[str, torch.Tensor]) -> str:
+    """Return a deterministic SHA-256 fingerprint of model parameters."""
+    digest = hashlib.sha256()
+
+    for key in sorted(state_dict):
+        tensor = state_dict[key].detach().cpu().contiguous()
+        digest.update(key.encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("utf-8"))
+        digest.update(str(tuple(tensor.shape)).encode("utf-8"))
+        digest.update(tensor.numpy().tobytes())
+
+    return digest.hexdigest()
+
+
+def initialize_model_from_checkpoint(
+    model,
+    checkpoint_path: str | Path,
+    device: torch.device | str = "cpu",
+    strict: bool = True,
+) -> dict[str, Any]:
+    """
+    Initialize only model weights from an external checkpoint.
+
+    This is intentionally different from `load_checkpoint()`:
+    it does not restore epoch, optimizer, scheduler or AMP scaler state.
+    Use it for a new sequential-transfer experiment, e.g.
+    CrackSeg9K -> DACL10K.
+    """
+    checkpoint_path = Path(checkpoint_path)
+
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"[transfer] source checkpoint not found: {checkpoint_path.resolve()}"
+        )
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    if not isinstance(checkpoint, dict):
+        raise TypeError(
+            "[transfer] unsupported checkpoint format: expected a dictionary."
+        )
+
+    if "model" not in checkpoint:
+        available = ", ".join(sorted(checkpoint.keys()))
+        raise KeyError(
+            "[transfer] checkpoint does not contain key 'model'. "
+            f"Available keys: {available}"
+        )
+
+    source_state_dict = checkpoint["model"]
+
+    if not isinstance(source_state_dict, dict):
+        raise TypeError(
+            "[transfer] checkpoint['model'] must be a PyTorch state_dict."
+        )
+
+    incompatible = model.load_state_dict(source_state_dict, strict=strict)
+
+    if strict and (
+        incompatible.missing_keys or incompatible.unexpected_keys
+    ):
+        raise RuntimeError(
+            "[transfer] strict model initialization failed. "
+            f"Missing keys: {incompatible.missing_keys}; "
+            f"Unexpected keys: {incompatible.unexpected_keys}"
+        )
+
+    metadata = {
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_epoch": checkpoint.get("epoch"),
+        "checkpoint_best_dice": checkpoint.get("best_dice"),
+        "checkpoint_keys": sorted(checkpoint.keys()),
+        "strict": bool(strict),
+        "missing_keys": list(incompatible.missing_keys),
+        "unexpected_keys": list(incompatible.unexpected_keys),
+        "source_model_sha256": state_dict_sha256(source_state_dict),
+        "initialized_model_sha256": state_dict_sha256(model.state_dict()),
+    }
+
+    if metadata["source_model_sha256"] != metadata["initialized_model_sha256"]:
+        raise RuntimeError(
+            "[transfer] loaded model fingerprint differs from the source state_dict. "
+            "This should not happen with strict full-model initialization."
+        )
+
+    print(
+        "[transfer] initialized model weights from "
+        f"{metadata['checkpoint_path']}"
+    )
+    print(
+        "[transfer] source epoch="
+        f"{metadata['checkpoint_epoch']} | "
+        f"source best_dice={metadata['checkpoint_best_dice']}"
+    )
+    print(
+        "[transfer] SHA-256="
+        f"{metadata['initialized_model_sha256']}"
+    )
+
+    return metadata
 
 # --------------------------------------------------------------------------- #
 # Full training run

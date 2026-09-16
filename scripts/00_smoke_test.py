@@ -22,6 +22,9 @@ import cv2
 import numpy as np
 import yaml
 
+import tempfile
+import torch
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
@@ -109,6 +112,45 @@ def run(command: list[str]) -> None:
     subprocess.run(command, check=True, cwd=ROOT)
 
 
+def test_transfer_checkpoint_initialization() -> None:
+    from src.engine import initialize_model_from_checkpoint
+
+    source = torch.nn.Conv2d(3, 1, kernel_size=1)
+    target = torch.nn.Conv2d(3, 1, kernel_size=1)
+
+    with torch.no_grad():
+        source.weight.fill_(0.123)
+        source.bias.fill_(-0.456)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        checkpoint_path = Path(tmp_dir) / "source.pt"
+
+        torch.save(
+            {
+                "epoch": 7,
+                "best_dice": 0.7546,
+                "model": source.state_dict(),
+                "optimizer": {"not": "used in transfer"},
+            },
+            checkpoint_path,
+        )
+
+        metadata = initialize_model_from_checkpoint(
+            model=target,
+            checkpoint_path=checkpoint_path,
+            device="cpu",
+            strict=True,
+        )
+
+    assert torch.equal(source.weight, target.weight)
+    assert torch.equal(source.bias, target.bias)
+    assert metadata["checkpoint_epoch"] == 7
+    assert metadata["checkpoint_best_dice"] == 0.7546
+    assert metadata["source_model_sha256"] == metadata["initialized_model_sha256"]
+
+    print("[smoke] transfer checkpoint initialization: PASS")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = Path(tmp_name)
@@ -123,6 +165,8 @@ def main() -> None:
         run([sys.executable, "scripts/03_evaluate.py", "--run-dir", str(run_dir), "--cross-dataset"])
         run([sys.executable, "scripts/07_train_dacl10k_patches.py", "--config", str(config), "--run-name", "smoke_patch"])
         run([sys.executable, "scripts/08_evaluate_dacl10k_sliding.py", "--run-dir", str(patch_run_dir)])
+
+        test_transfer_checkpoint_initialization()
 
         print("\nSMOKE TEST PASSED - pipeline is consistent end to end.")
 

@@ -72,7 +72,7 @@ data:
   prefetch_factor: 4
 
 model:
-  arch: "deeplabv3plus"        # unet | unetplusplus | deeplabv3plus
+  arch: "unetplusplus"        # unet | unetplusplus | deeplabv3plus
   encoder: "resnet34"          # smp encoder name
   encoder_weights: "imagenet"  # null to train from scratch
   in_channels: 3
@@ -86,7 +86,7 @@ loss:
 
   bce_weight: 0.5
   dice_weight: 0.5
-  pos_weight: 5.0
+  pos_weight: 2.0
 
   focal_weight: 0.5
   focal_alpha: 0.833
@@ -100,7 +100,7 @@ train:
   weight_decay: 0.0001
   amp: true                    # mixed precision: ~2x faster on Colab T4
   early_stopping_patience: 10
-  resume: true
+  resume: false
   warmup_epochs: 2
   warmup_start_factor: 0.1
   # Cosine annealing with warm restarts (SGDR).
@@ -109,8 +109,17 @@ train:
     t_mult: 1                  # each cycle lasts t_mult times the previous one
     eta_min: 0.000005
 
+transfer:
+  init_checkpoint: "outputs/runs/p0_unetplusplus_r34_512_pw2/best.pt"
+  source_name: "P0 Crackseg9k U-Net++ ResNet34 best validation checkpoint"
+  source_dataset: "CrackSeg9K"
+  target_dataset: "DACL10K"
+  load_mode: "full_model"  # "full_model" | "encoder_only" | "decoder_only"
+  strict: true
+  reset_optimizer: true
+
 eval:
   # Threshold applied to sigmoid(logits).
-  threshold: 0.7
+  threshold: 0.5
   threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7]
   n_qualitative_samples: 6

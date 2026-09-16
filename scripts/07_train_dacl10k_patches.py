@@ -29,12 +29,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import matplotlib
-
 import numpy as np
+import torch
 
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import yaml
@@ -50,7 +52,7 @@ from src.data.dacl10k import (
     summarize_binary_targets,
 )
 from src.data.transforms import patch_eval_transform, patch_train_transform
-from src.engine import fit
+from src.engine import fit, initialize_model_from_checkpoint
 from src.losses import build_loss
 from src.models.unet import build_model, count_parameters
 from src.utils import ensure_dir, get_device, load_config, loader_kwargs, seed_everything
@@ -149,6 +151,244 @@ def make_validation_dataset(samples, cfg, labels):
     )
 
 
+def to_jsonable(value: Any) -> Any:
+    """
+    Convert metadata recursively to JSON-native types.
+
+    In particular, pathlib.Path objects are converted to strings so that experiment provenance remains portable across Windows and Linux.
+    """
+    if isinstance(value, Path):
+        return str(value)
+
+    if isinstance(value, dict):
+        return {
+            str(key): to_jsonable(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [
+            to_jsonable(item)
+            for item in value
+        ]
+
+    # Optional but robust: PyTorch device and tensor metadata.
+    if isinstance(value, torch.device):
+        return str(value)
+
+    # Converts NumPy scalar values, if any, to Python scalar values.
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return value.item()
+        except (ValueError, RuntimeError):
+            pass
+
+    return value
+
+
+def save_transfer_metadata(
+    run_dir: Path,
+    cfg,
+    metadata: dict | None,
+) -> None:
+    """
+    Save dataset-agnostic provenance for standard training or sequential transfer.
+
+    `source_dataset` identifies the dataset used to train `init_checkpoint`;
+
+    `target_dataset` identifies the dataset used by the current training run.
+    """
+    transfer_cfg = cfg.get("transfer", {})
+
+    init_checkpoint = transfer_cfg.get("init_checkpoint")
+    source_dataset = transfer_cfg.get("source_dataset")
+    target_dataset = transfer_cfg.get("target_dataset")
+
+    is_transfer = bool(init_checkpoint)
+
+    if is_transfer:
+        required_fields = {
+            "transfer.source_name": transfer_cfg.get("source_name"),
+            "transfer.source_dataset": source_dataset,
+            "transfer.target_dataset": target_dataset,
+        }
+
+        missing = [
+            field_name
+            for field_name, value in required_fields.items()
+            if not value
+        ]
+
+        if missing:
+            raise ValueError(
+                "[transfer] incomplete transfer configuration. "
+                f"Required fields: {', '.join(missing)}"
+            )
+
+        if source_dataset == target_dataset:
+            raise ValueError(
+                "[transfer] source_dataset and target_dataset must differ "
+                f"for sequential transfer; both are '{source_dataset}'."
+            )
+
+        direction = f"{source_dataset}_to_{target_dataset}"
+        initialization = "external_checkpoint_model_weights_only"
+
+    else:
+        direction = None
+        initialization = "model_factory_encoder_weights"
+
+    record = {
+        "experiment_type": (
+            "sequential_transfer"
+            if is_transfer
+            else "standard_target_training"
+        ),
+        "source_name": (
+            transfer_cfg.get("source_name")
+            if is_transfer
+            else None
+        ),
+        "source_dataset": (
+            source_dataset
+            if is_transfer
+            else None
+        ),
+        "target_dataset": target_dataset,
+        "direction": direction,
+        "initialization": initialization,
+        "optimizer_reinitialized": (
+            bool(transfer_cfg.get("reset_optimizer", True))
+            if is_transfer
+            else True
+        ),
+        "scheduler_reinitialized": True,
+        "amp_scaler_reinitialized": True,
+        "transfer_config": dict(transfer_cfg),
+        "checkpoint_load": metadata,
+    }
+
+    metadata_path = run_dir / "transfer_metadata.json"
+
+    
+    if metadata_path.exists():
+        print(
+            "[transfer] transfer_metadata.json already exists; "
+            "keeping original initialization provenance."
+        )
+        return
+
+    with open(metadata_path, "w", encoding="utf-8") as fh:
+        json.dump(
+            to_jsonable(record),
+            fh,
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=False,
+        )
+
+    print(f"[transfer] metadata saved to {metadata_path}")
+
+
+def save_resolved_run_config(
+    run_dir: Path,
+    cfg,
+    transfer_metadata: dict | None,
+    resumed: bool,
+) -> None:
+    """
+    Save the effective configuration of a run.
+
+    `model.encoder_weights` remains the model-factory bootstrap setting,
+    while `effective_initialization` records the actual weights used when
+    training begins.
+    """
+    run_cfg = dict(cfg)
+
+    transfer_cfg = run_cfg.get("transfer", {})
+    is_transfer = bool(transfer_cfg.get("init_checkpoint"))
+
+    run_cfg["model"]["model_factory_encoder_weights"] = (
+        run_cfg["model"].get("encoder_weights")
+    )
+
+    source_name = transfer_cfg.get("source_name", "external checkpoint")
+    source_dataset = transfer_cfg.get("source_dataset", "unknown")
+    target_dataset = transfer_cfg.get("target_dataset", "unknown")
+
+    if is_transfer:
+        run_cfg["model"]["effective_initialization"] = (
+            f"full_model_checkpoint: {source_name} "
+            f"({source_dataset}_to_{target_dataset})"
+        )
+        run_cfg["model"]["effective_checkpoint"] = str(
+            transfer_cfg["init_checkpoint"]
+        )
+        run_cfg["model"]["effective_source_dataset"] = str(
+            transfer_cfg["source_dataset"]
+        )
+        run_cfg["model"]["effective_target_dataset"] = str(
+            transfer_cfg["target_dataset"]
+        )
+        run_cfg["model"]["effective_load_mode"] = str(
+            transfer_cfg.get("load_mode", "full_model")
+        )
+        run_cfg["model"]["effective_strict_loading"] = bool(
+            transfer_cfg.get("strict", True)
+        )
+
+        if transfer_metadata is not None:
+            run_cfg["model"]["effective_source_model_sha256"] = (
+                transfer_metadata.get("source_model_sha256")
+            )
+            run_cfg["model"]["effective_initialized_model_sha256"] = (
+                transfer_metadata.get("initialized_model_sha256")
+            )
+
+    else:
+        run_cfg["model"]["effective_initialization"] = (
+            f"model_factory_encoder_weights={run_cfg['model'].get('encoder_weights')}"
+        )
+
+    run_cfg["run_provenance"] = {
+        "resumed_from_local_last_checkpoint": bool(resumed),
+        "optimizer_state_initialization": (
+            "fresh"
+            if not resumed
+            else "restored_from_local_last_pt"
+        ),
+        "scheduler_state_initialization": (
+            "fresh"
+            if not resumed
+            else "restored_from_local_last_pt"
+        ),
+        "amp_scaler_state_initialization": (
+            "fresh"
+            if not resumed
+            else "restored_from_local_last_pt"
+        ),
+    }
+
+    config_path = run_dir / "config.yaml"
+
+    if config_path.exists():
+        print(
+            "[config] config.yaml already exists; "
+            "keeping original run configuration."
+        )
+        return
+
+    with open(config_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(
+            to_jsonable(run_cfg),
+            fh,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+
+    print(f"[config] resolved run configuration saved to {config_path}")
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config, args.set)
@@ -160,9 +400,7 @@ def main() -> None:
     )
     run_dir = ensure_dir(Path(cfg.project.output_dir) / "runs" / run_name)
 
-    with open(run_dir / "config.yaml", "w", encoding="utf-8") as fh:
-        yaml.safe_dump(dict(cfg), fh, sort_keys=False)
-
+    
     labels = list(cfg.data.dacl10k.get("crack_labels", ["Crack", "ACrack"]))
     train_samples = list_samples(cfg.data.dacl10k.root, cfg.data.dacl10k.train_split)
     val_samples = list_samples(cfg.data.dacl10k.root, cfg.data.dacl10k.val_split)
@@ -190,7 +428,7 @@ def main() -> None:
             raise FileNotFoundError(
                 "Hard-negative mining is enabled, but the pool does not exist:\n"
                 f"  {pool_path}\n"
-                "Generate it first using scripts/08_mine_hard_negatives.py."
+                "Generate it first using scripts/09_mine_hard_negatives.py."
             )
 
         if not Path(hnm_cfg.source_checkpoint).is_file():
@@ -363,7 +601,13 @@ def main() -> None:
         ),
     }
     with open(run_dir / "dataset_summary.json", "w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2)
+        json.dump(
+            to_jsonable(summary),
+            fh,
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=False,
+        )
 
 
     common = loader_kwargs(cfg.data, device)
@@ -382,11 +626,66 @@ def main() -> None:
     )
 
     model = build_model(cfg.model)
+    
+    transfer_cfg = cfg.get("transfer", {})
+    if not transfer_cfg.get("init_checkpoint"):
+        print(
+            "[transfer] no init_checkpoint configured: "
+            "training will use model-factory initialization only."
+        )
+    transfer_metadata: dict | None = None
+
+    last_checkpoint_path = run_dir / "last.pt"
+    resume_requested = bool(cfg.train.get("resume", False))
+    last_checkpoint_exists = last_checkpoint_path.exists()
+
+    if last_checkpoint_exists and not resume_requested:
+        raise RuntimeError(
+            "[run] existing last.pt found, but train.resume=false. "
+            "Use resume=true, choose a new run name, or delete the run directory."
+        )
+
+    local_resume_exists = resume_requested and last_checkpoint_exists
+
+    if local_resume_exists:
+        print(
+            "[transfer] existing local last.pt found: "
+            "fit() will resume this P2 run; external initialization is skipped."
+        )
+
+    elif transfer_cfg.get("init_checkpoint"):
+        if transfer_cfg.get("load_mode", "full_model") != "full_model":
+            raise ValueError(
+                "[transfer] P2 currently supports only "
+                "transfer.load_mode='full_model'."
+            )
+
+        transfer_metadata = initialize_model_from_checkpoint(
+            model=model,
+            checkpoint_path=transfer_cfg["init_checkpoint"],
+            device=device,
+            strict=bool(transfer_cfg.get("strict", True)),
+        )
+
+    save_transfer_metadata(
+        run_dir=run_dir,
+        cfg=cfg,
+        metadata=transfer_metadata,
+    )
+
+    save_resolved_run_config(
+        run_dir=run_dir,
+        cfg=cfg,
+        transfer_metadata=transfer_metadata,
+        resumed=local_resume_exists,
+    )
+
     total, trainable = count_parameters(model)
     print(
         f"[model] {cfg.model.arch}/{cfg.model.encoder} - "
         f"{total / 1e6:.1f}M params ({trainable / 1e6:.1f}M trainable)"
     )
+
     criterion = build_loss(cfg.loss).to(device)
 
     best = fit(model, train_loader, val_loader, criterion, cfg, device, run_dir)

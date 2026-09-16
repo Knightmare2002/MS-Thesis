@@ -55,7 +55,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--checkpoint", default="best.pt")
     parser.add_argument("--limit", type=int, default=None, help="debug: evaluate only N images")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Directory for evaluation artifacts. "
+            "Defaults to <run-dir>/eval_sliding."
+        ),
+    )
     return parser.parse_args()
+    
 
 
 def load_rgb_and_mask(sample, labels):
@@ -251,7 +260,11 @@ def main() -> None:
         else float("nan"),
     )
 
-    eval_dir = ensure_dir(run_dir / "eval_sliding")
+    eval_dir = ensure_dir(
+        Path(args.output_dir)
+        if args.output_dir is not None
+        else run_dir / "eval_sliding"
+    )
     results.to_csv(eval_dir / "metrics_dacl10k_val_sliding.csv", index=False)
 
     with open(eval_dir / "validation_composition.json", "w", encoding="utf-8") as fh:
