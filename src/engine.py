@@ -164,6 +164,10 @@ def initialize_model_from_checkpoint(
             "[transfer] checkpoint['model'] must be a PyTorch state_dict."
         )
 
+    # Model fingerprint, BEFORE the transfer.
+    factory_sha256 = state_dict_sha256(model.state_dict())
+
+    # Carica una sola volta i pesi P0 nel modello target.
     incompatible = model.load_state_dict(source_state_dict, strict=strict)
 
     if strict and (
@@ -175,6 +179,21 @@ def initialize_model_from_checkpoint(
             f"Unexpected keys: {incompatible.unexpected_keys}"
         )
 
+    initialized_model_sha256 = state_dict_sha256(model.state_dict())
+    source_model_sha256 = state_dict_sha256(source_state_dict)
+
+    if initialized_model_sha256 == factory_sha256:
+        raise RuntimeError(
+            "[transfer] model weights are unchanged after loading: "
+            "the checkpoint did not overwrite the factory initialization."
+        )
+
+    if strict and source_model_sha256 != initialized_model_sha256:
+        raise RuntimeError(
+            "[transfer] loaded model fingerprint differs from the source state_dict "
+            "under strict loading."
+        )
+
     metadata = {
         "checkpoint_path": str(checkpoint_path.resolve()),
         "checkpoint_epoch": checkpoint.get("epoch"),
@@ -183,14 +202,10 @@ def initialize_model_from_checkpoint(
         "strict": bool(strict),
         "missing_keys": list(incompatible.missing_keys),
         "unexpected_keys": list(incompatible.unexpected_keys),
-        "source_model_sha256": state_dict_sha256(source_state_dict),
-        "initialized_model_sha256": state_dict_sha256(model.state_dict()),
+        "factory_model_sha256": factory_sha256,
+        "source_model_sha256": source_model_sha256,
+        "initialized_model_sha256": initialized_model_sha256,
     }
-
-    # Fingerprint BEFORE loading: this is what makes the check meaningful.
-    factory_sha256 = state_dict_sha256(model.state_dict())
-
-    incompatible = model.load_state_dict(source_state_dict, strict=strict)
 
     if metadata["initialized_model_sha256"] == factory_sha256:
         raise RuntimeError(
