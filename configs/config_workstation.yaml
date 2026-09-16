@@ -1,0 +1,125 @@
+# =============================================================================
+# Single source of truth for paths and hyper-parameters.
+# Override any field from the CLI, e.g.:
+#   python scripts/02_train_unet.py --config configs/config.yaml --set train.epochs=5
+# =============================================================================
+
+project:
+  seed: 42
+  # Everything the scripts write (figures, csv, checkpoints) goes under this root.
+  output_dir: "/home/sam/Thesis/MS-Thesis/outputs"
+
+data:
+  # ---- CrackSeg9k: flat folders of images and binary masks -------------------
+  crackseg9k:
+    images_dir: "/home/sam/Thesis/MS-Thesis/datasets/crackseg9k/images"
+    masks_dir: "/home/sam/Thesis/MS-Thesis/datasets/crackseg9k/masks"
+    # Masks are binarised as (mask > mask_threshold) -> crack = 1.
+    mask_threshold: 0
+    # Random split, stratified is not needed for a binary dense task.
+    val_fraction: 0.15
+    test_fraction: 0.15
+
+  # ---- dacl10k: official layout images/<split>, annotations/<split> ---------
+  dacl10k:
+    root: "/home/sam/Thesis/MS-Thesis/datasets/dacl10k"
+    train_split: "train"
+    val_split: "validation"
+    crack_labels: ["Crack", "ACrack"]
+
+  p1:
+    task_name: "dacl10k_crack_binary"
+    train_positive_fraction: 0.50
+    use_weighted_sampler: true
+    save_qualitative_split: "val"
+
+  p1_patch:
+    task_name: "dacl10k_crack_patch_glb_positive_quota"
+    patch_size: 512
+    positive_patch_fraction: 0.60
+    min_positive_pixels: 256
+    max_negative_pixels: 0
+    max_crop_attempts: 100       # maximum number of attempts to find a patch with enough positive pixels
+    patches_per_image: 4
+
+    eval_stride: 256            # Stride for sliding-window inference
+    eval_batch_size: 4          # Batch size for sliding-window inference
+    blend_mode: "gaussian"      # Blend mode for overlapping patches: "gaussian" | "uniform"
+
+    sanity_check_samples: 512   # Number of samples to use for sanity check during training
+ 
+  hard_negative_mining:
+    enabled: true
+    source_checkpoint: "/home/sam/Thesis/MS-Thesis/outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/best.pt"
+    pool_path: "/home/sam/Thesis/MS-Thesis/outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/hard_negative_pool_train.json"
+    candidate_stride: 256
+    top_k_per_image: 3
+    max_window_overlap: 0.25
+
+    probability_threshold: 0.50
+    min_predicted_fraction: 0.002
+    
+    hard_negative_fraction: 0.50
+
+    negative_images_only: true
+
+    refresh_each_epoch: false
+    seed: 42
+
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+
+model:
+  arch: "unetplusplus"        # unet | unetplusplus | deeplabv3plus
+  encoder: "resnet34"          # smp encoder name
+  encoder_weights: "imagenet"  # null to train from scratch
+  in_channels: 3
+  classes: 1                   # binary crack segmentation
+
+loss:
+  # - "bce_dice": Weighted BCEWithLogits + Soft Dice
+  # - "focal_dice": Focal BCE + Soft Dice
+
+  name: "bce_dice"
+
+  bce_weight: 0.5
+  dice_weight: 0.5
+  pos_weight: 2.0
+
+  focal_weight: 0.5
+  focal_alpha: 0.833
+  focal_gamma: 2.0
+
+train:
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2        # effective batch = batch_size * accumulation_steps
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true                    # mixed precision: ~2x faster on Colab T4
+  early_stopping_patience: 10
+  resume: false
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  # Cosine annealing with warm restarts (SGDR).
+  scheduler:
+    t_0: 10                     # epochs before the first restart
+    t_mult: 1                  # each cycle lasts t_mult times the previous one
+    eta_min: 0.000005
+
+transfer:
+  init_checkpoint: "/home/sam/Thesis/MS-Thesis/outputs/runs/p0_unetplusplus_r34_512_pw2/best.pt"
+  source_name: "P0 Crackseg9k U-Net++ ResNet34 best validation checkpoint"
+  source_dataset: "CrackSeg9K"
+  target_dataset: "DACL10K"
+  load_mode: "full_model"  # "full_model" | "encoder_only" | "decoder_only"
+  strict: true
+  reset_optimizer: true
+
+eval:
+  # Threshold applied to sigmoid(logits).
+  threshold: 0.5
+  threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7]
+  n_qualitative_samples: 6
