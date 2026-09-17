@@ -22,7 +22,6 @@ import cv2
 import numpy as np
 import yaml
 
-import tempfile
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
