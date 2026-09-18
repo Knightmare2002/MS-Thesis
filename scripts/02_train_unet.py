@@ -28,16 +28,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
-import yaml
 from torch.utils.data import DataLoader
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from src.data.crackseg9k import CrackSeg9kDataset, list_pairs, split_pairs
+from src.data.crackseg9k import (
+    CrackSeg9kDataset,
+    list_pairs,
+    load_frozen_split,
+    split_pairs,
+)
 from src.data.transforms import eval_transform, train_transform
-from src.engine import fit
+from src.engine import fit, initialize_model_from_checkpoint
 from src.losses import build_loss
 from src.models.unet import build_model, count_parameters
+from src.provenance import save_resolved_run_config, save_transfer_metadata
 from src.utils import ensure_dir, get_device, load_config, loader_kwargs, seed_everything
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +52,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default=None, help="defaults to <arch>_<encoder>_<size>")
     parser.add_argument("--limit-train", type=int, default=None, help="use only N training images")
     parser.add_argument("--limit-val", type=int, default=None, help="use only N validation images")
+    parser.add_argument(
+        "--split-json",
+        default=None,
+        help=(
+            "Reuse the frozen split.json of a previous run "
+            "(mandatory for P3, to match the control run split)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -82,24 +95,43 @@ def main() -> None:
 
     run_name = args.run_name or f"{cfg.model.arch}_{cfg.model.encoder}_{cfg.data.image_size}"
     run_dir = ensure_dir(Path(cfg.project.output_dir) / "runs" / run_name)
-    with open(run_dir / "config.yaml", "w", encoding="utf-8") as fh:
-        yaml.safe_dump(dict(cfg), fh, sort_keys=False)
-
-    # ---- Data --------------------------------------------------------------
+        # ---- Data --------------------------------------------------------------
+    # config.yaml is written later by save_resolved_run_config(), so that it can
+    # also record which weights training actually started from.
     pairs = list_pairs(cfg.data.crackseg9k.images_dir, cfg.data.crackseg9k.masks_dir)
-    splits = split_pairs(
-        pairs,
-        val_fraction=cfg.data.crackseg9k.val_fraction,
-        test_fraction=cfg.data.crackseg9k.test_fraction,
-        seed=cfg.project.seed,
-    )
-    # Freeze the split on disk: the test set must stay untouched across runs.
+
+    if args.split_json:
+        splits = load_frozen_split(args.split_json, pairs)
+        split_source = str(args.split_json)
+    else:
+        splits = split_pairs(
+            pairs,
+            val_fraction=cfg.data.crackseg9k.val_fraction,
+            test_fraction=cfg.data.crackseg9k.test_fraction,
+            seed=cfg.project.seed,
+        )
+        split_source = "recomputed_from_folder_content"
+
+    # Freeze the split on disk: the test set must stay untouched across runs, and
+    # a transfer run must be reproducible from the same file.
     with open(run_dir / "split.json", "w", encoding="utf-8") as fh:
-        json.dump({k: [str(i.name) for i, _ in v] for k, v in splits.items()}, fh, indent=2)
+        json.dump(
+            {
+                "split_source": split_source,
+                "seed": int(cfg.project.seed),
+                "n_pairs_available": len(pairs),
+                **{key: [image.name for image, _ in value] for key, value in splits.items()},
+            },
+            fh,
+            indent=2,
+        )
 
     train_items = splits["train"][: args.limit_train] if args.limit_train else splits["train"]
     val_items = splits["val"][: args.limit_val] if args.limit_val else splits["val"]
-    print(f"[data] train {len(train_items)} | val {len(val_items)} | test {len(splits['test'])}")
+    print(
+        f"[data] train {len(train_items)} | val {len(val_items)} | "
+        f"test {len(splits['test'])} | split source {split_source}"
+    )
 
     train_ds = CrackSeg9kDataset(
         train_items, train_transform(cfg.data.image_size), cfg.data.crackseg9k.mask_threshold
@@ -114,8 +146,65 @@ def main() -> None:
 
     # ---- Model + loss ------------------------------------------------------
     model = build_model(cfg.model)
+
+    transfer_cfg = cfg.get("transfer", {})
+    if not transfer_cfg.get("init_checkpoint"):
+        print(
+            "[transfer] no init_checkpoint configured: "
+            "training will use model-factory initialization only."
+        )
+    transfer_metadata: dict | None = None
+
+    last_checkpoint_path = run_dir / "last.pt"
+    resume_requested = bool(cfg.train.get("resume", False))
+    last_checkpoint_exists = last_checkpoint_path.exists()
+
+    if last_checkpoint_exists and not resume_requested:
+        raise RuntimeError(
+            "[run] existing last.pt found, but train.resume=false. "
+            "Use resume=true, choose a new run name, or delete the run directory."
+        )
+
+    local_resume_exists = resume_requested and last_checkpoint_exists
+
+    if local_resume_exists:
+        print(
+            "[transfer] existing local last.pt found: "
+            "fit() will resume this P3 run; external initialization is skipped."
+        )
+
+    elif transfer_cfg.get("init_checkpoint"):
+        if transfer_cfg.get("load_mode", "full_model") != "full_model":
+            raise ValueError(
+                "[transfer] P3 currently supports only "
+                "transfer.load_mode='full_model'."
+            )
+
+        transfer_metadata = initialize_model_from_checkpoint(
+            model=model,
+            checkpoint_path=transfer_cfg["init_checkpoint"],
+            device=device,
+            strict=bool(transfer_cfg.get("strict", True)),
+        )
+
+    save_transfer_metadata(
+        run_dir=run_dir,
+        cfg=cfg,
+        metadata=transfer_metadata,
+    )
+
+    save_resolved_run_config(
+        run_dir=run_dir,
+        cfg=cfg,
+        transfer_metadata=transfer_metadata,
+        resumed=local_resume_exists,
+    )
+
     total, trainable = count_parameters(model)
-    print(f"[model] {cfg.model.arch}/{cfg.model.encoder} - {total/1e6:.1f}M params ({trainable/1e6:.1f}M trainable)")
+    print(
+        f"[model] {cfg.model.arch}/{cfg.model.encoder} - "
+        f"{total/1e6:.1f}M params ({trainable/1e6:.1f}M trainable)"
+    )
     criterion = build_loss(cfg.loss).to(device)
 
     # ---- Train -------------------------------------------------------------

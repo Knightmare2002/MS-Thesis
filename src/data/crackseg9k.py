@@ -12,6 +12,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import json
+
 from torch.utils.data import Dataset
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -63,6 +65,55 @@ def split_pairs(
     }
 
 
+def load_frozen_split(
+    split_path: str | Path,
+    pairs: list[tuple[Path, Path]],
+) -> dict[str, list[tuple[Path, Path]]]:
+    """Rebuild train/val/test from a `split.json` written by a previous run.
+
+    `split_pairs` derives the partition from the *content* of the dataset
+    folders, so it is not stable across time: adding, removing or renaming a
+    single file reshuffles every split. A sequential-transfer run towards
+    CrackSeg9K (P3) must reuse the exact split of its control run, otherwise the
+    two are measured on different validation and test sets.
+    """
+    split_path = Path(split_path)
+
+    with open(split_path, encoding="utf-8") as fh:
+        frozen = json.load(fh)
+
+    by_name = {image_path.name: (image_path, mask_path) for image_path, mask_path in pairs}
+
+    splits: dict[str, list[tuple[Path, Path]]] = {}
+    missing: list[str] = []
+
+    for split_name in ("train", "val", "test"):
+        names = list(frozen.get(split_name, []))
+        splits[split_name] = [by_name[name] for name in names if name in by_name]
+        missing.extend(name for name in names if name not in by_name)
+
+    if missing:
+        raise RuntimeError(
+            f"[split] {len(missing)} images listed in {split_path} are absent from the "
+            f"dataset folders, e.g. {missing[:5]}. The frozen split cannot be reproduced: "
+            "the transfer comparison would be measured on a different set."
+        )
+
+    # Leakage guard: the three splits must remain disjoint.
+    for first, second in (("train", "val"), ("train", "test"), ("val", "test")):
+        overlap = {p.name for p, _ in splits[first]} & {p.name for p, _ in splits[second]}
+        if overlap:
+            raise RuntimeError(
+                f"[split] {len(overlap)} images appear in both '{first}' and '{second}', "
+                f"e.g. {sorted(overlap)[:5]}."
+            )
+
+    print(
+        f"[split] frozen split loaded from {split_path} | "
+        f"train {len(splits['train'])} | val {len(splits['val'])} | test {len(splits['test'])}"
+    )
+
+    return splits
 # --------------------------------------------------------------------------- #
 # Dataset
 # --------------------------------------------------------------------------- #

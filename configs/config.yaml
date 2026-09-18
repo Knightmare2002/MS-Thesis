@@ -49,7 +49,7 @@ data:
     sanity_check_samples: 512   # Number of samples to use for sanity check during training
  
   hard_negative_mining:
-    enabled: true
+    enabled: false
     source_checkpoint: "outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/best.pt"
     pool_path: "outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/hard_negative_pool_train.json"
     candidate_stride: 256
@@ -110,10 +110,10 @@ train:
     eta_min: 0.000005
 
 transfer:
-  init_checkpoint: "outputs/runs/p0_unetplusplus_r34_512_pw2/best.pt"
-  source_name: "P0 Crackseg9k U-Net++ ResNet34 best validation checkpoint"
-  source_dataset: "CrackSeg9K"
-  target_dataset: "DACL10K"
+  init_checkpoint: "outputs/runs/p1b4_unetplusplus_r34_minpos256_pw5_hnm/best.pt"
+  source_name: "P1 DACL10K U-Net++ ResNet34 best validation checkpoint"
+  source_dataset: "DACL10K"
+  target_dataset: "CrackSeg9K"
   load_mode: "full_model"  # "full_model" | "encoder_only" | "decoder_only"
   strict: true
   reset_optimizer: true
