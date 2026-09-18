@@ -36,6 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
     parser.add_argument("--mode", default="sliding", choices=["sliding", "resize"])
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--split-json", default=None, help="frozen split.json of the reference run")
+    parser.add_argument("--set", nargs="*", default=[], help="config overrides key=value")
     return parser.parse_args()
 
 
@@ -80,14 +82,16 @@ def main() -> None:
     )
 
     pairs = list_pairs(cfg.data.crackseg9k.images_dir, cfg.data.crackseg9k.masks_dir)
-    splits = split_pairs(
-        pairs,
-        val_fraction=cfg.data.crackseg9k.val_fraction,
-        test_fraction=cfg.data.crackseg9k.test_fraction,
-        seed=cfg.project.seed,
-    )
+    if args.split_json:
+        splits = load_frozen_split(args.split_json, pairs)
+    else:
+        splits = split_pairs(
+            pairs,
+            val_fraction=cfg.data.crackseg9k.val_fraction,
+            test_fraction=cfg.data.crackseg9k.test_fraction,
+            seed=cfg.project.seed,
+        )
     items = splits[args.split]
-    items = items[: args.limit] if args.limit else items
 
     mask_threshold = int(cfg.data.crackseg9k.mask_threshold)
     image_size = int(cfg.data.image_size)
