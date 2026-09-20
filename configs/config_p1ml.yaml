@@ -1,0 +1,109 @@
+# =============================================================================
+# P1ML - DACL10K multilabel damage segmentation (6 independent channels).
+#
+# Standalone configuration: configs/config.yaml and configs/config_workstation.yaml
+# remain the single source of truth for the binary pipelines (P0/P1/P2/P3).
+#
+# Only the run-B override touches `transfer`, so runs A and B differ exclusively
+# by the initialization:
+#   A) python scripts/11_train_dacl10k_multilabel.py --run-name p1ml_unetpp_r34_imagenet
+#   B) ... --set transfer.init_checkpoint=<path> transfer.source_name=... (see docs)
+# =============================================================================
+
+project:
+  seed: 42
+  output_dir: "outputs"
+
+data:
+  dacl10k:
+    root: "datasets/dacl10k"
+    train_split: "train"
+    val_split: "validation"
+    # Kept for the binary rasterization utilities; unused by P1ML.
+    crack_labels: ["Crack", "ACrack"]
+
+  # Patch sampling: identical geometry to the best binary pipeline (P1-B4), so
+  # the two families remain comparable. The only semantic change is that a patch
+  # is positive when the UNION of the 6 damage channels has enough pixels.
+  p1ml_patch:
+    task_name: "dacl10k_multilabel_damage_patch"
+    patch_size: 512
+    positive_patch_fraction: 0.60
+    min_positive_pixels: 256
+    max_negative_pixels: 0
+    max_crop_attempts: 100
+    patches_per_image: 4
+
+    eval_stride: 256
+    eval_batch_size: 4
+    blend_mode: "gaussian"
+
+    sanity_check_samples: 512
+
+    # pos_weight vector: estimated on the official train split ONLY.
+    # Cache it once and reuse it in every P1ML run: runs A and B must optimize
+    # the exact same objective.
+    class_weights:
+      cache_path: "outputs/stats/dacl10k_multilabel_class_weights.json"
+      max_images: null        # null = full train split; set e.g. 2000 to subsample
+      clip_min: 1.0
+      clip_max: 20.0
+
+  # Hard negative mining stays OFF in the first P1ML pipeline: the P1-B3 pool was
+  # mined by a binary crack model and would bias the multilabel negatives.
+  hard_negative_mining:
+    enabled: false
+
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+
+model:
+  arch: "unetplusplus"
+  encoder: "resnet34"
+  encoder_weights: "imagenet"   # run A bootstrap; run B overwrites it via transfer
+  in_channels: 3
+  classes: 6                    # crack, spalling, corrosion, moisture, delamination, surface
+
+loss:
+  # Sigmoid + per-channel BCEWithLogits (vector pos_weight) + per-channel Soft Dice.
+  # Never softmax/CrossEntropy: the channels are independent and may overlap.
+  name: "multilabel_bce_dice"
+  bce_weight: 0.5
+  dice_weight: 0.5
+
+train:
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true
+  early_stopping_patience: 10
+  resume: false
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  scheduler:
+    t_0: 10
+    t_mult: 1
+    eta_min: 0.000005
+  # Checkpoint selection and early stopping: macro Dice over the classes present
+  # in the monitor split. Not pixel accuracy (trivially high), not crack-only.
+  selection_metric: "macro_dice_present"
+
+transfer:
+  # Run A: null. Run B: P1-B4 binary DACL10K checkpoint.
+  init_checkpoint: null
+  source_name: "P1-B4 DACL10K binary crack U-Net++/ResNet-34 best checkpoint"
+  source_dataset: "DACL10K_crack_binary"
+  target_dataset: "DACL10K_multilabel_damage"
+  # Encoder + decoder are transferred; the 1-channel head is replaced by a
+  # 6-channel head initialised from scratch.
+  load_mode: "partial_encoder_decoder"
+  reset_optimizer: true
+
+eval:
+  threshold: 0.5
+  threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7]
+  n_qualitative_samples: 6

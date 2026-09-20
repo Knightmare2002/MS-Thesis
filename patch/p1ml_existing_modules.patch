@@ -1,0 +1,1077 @@
+--- a/src/data/class_mapping.py
++++ b/src/data/class_mapping.py
+@@ -100,3 +100,90 @@
+     if unknown:
+         raise KeyError(f"Unknown dacl10k labels: {unknown}")
+     return [DACL10K_CLASS_TO_IDX[lab] for lab in labels]
++
++
++# --------------------------------------------------------------------------- #
++# P1ML: DACL10K 19 -> 6 unified damage channels (single source of truth)
++# --------------------------------------------------------------------------- #
++# The multilabel pipeline is damage-only: bridge components are annotated in
++# DACL10K but are not damages, so they are excluded from the target tensor
++# instead of being folded into a residual channel (a "component" channel would
++# make the macro Dice reward object detection, not damage detection).
++DACL10K_EXCLUDED_FROM_DAMAGE: list[str] = [
++    "Bearing", "EJoint", "Drainage", "PEquipment", "JTape",
++]
++
++
++def unified_damage_label_groups() -> dict[str, list[str]]:
++    """Return {unified damage class -> DACL10K labels}, built from DACL10K_TO_UNIFIED.
++
++    This is the only place where the 19 -> 6 grouping is materialised: datasets,
++    losses, metrics and scripts must derive their channel order from here so a
++    change to the taxonomy cannot desynchronise them.
++    """
++    groups: dict[str, list[str]] = {name: [] for name in UNIFIED_DAMAGE_CLASSES}
++
++    for label in DACL10K_CLASSES:
++        if label not in DACL10K_TO_UNIFIED:
++            raise KeyError(
++                f"DACL10K label '{label}' has no entry in DACL10K_TO_UNIFIED: "
++                "the taxonomy is incomplete."
++            )
++
++        unified = DACL10K_TO_UNIFIED[label]
++        if unified is None:
++            continue
++
++        if unified not in groups:
++            raise KeyError(
++                f"DACL10K_TO_UNIFIED maps '{label}' to unknown unified class "
++                f"'{unified}'."
++            )
++
++        groups[unified].append(label)
++
++    empty = [name for name, labels in groups.items() if not labels]
++    if empty:
++        raise RuntimeError(f"Unified damage classes without DACL10K labels: {empty}")
++
++    return groups
++
++
++def unified_damage_label_to_channel() -> dict[str, int]:
++    """Return {DACL10K label -> unified damage channel index}, excluded labels absent."""
++    groups = unified_damage_label_groups()
++    return {
++        label: channel
++        for channel, name in enumerate(UNIFIED_DAMAGE_CLASSES)
++        for label in groups[name]
++    }
++
++
++def unified_damage_channel_groups() -> list[list[int]]:
++    """Return, per unified channel, the DACL10K channel indices merged into it."""
++    groups = unified_damage_label_groups()
++    return [dacl10k_channels_for(groups[name]) for name in UNIFIED_DAMAGE_CLASSES]
++
++
++def assert_unified_damage_taxonomy() -> None:
++    """Fail loudly if the 19 -> 6 mapping is inconsistent (used by the smoke test)."""
++    groups = unified_damage_label_groups()
++    mapped = [label for labels in groups.values() for label in labels]
++
++    duplicated = {label for label in mapped if mapped.count(label) > 1}
++    if duplicated:
++        raise RuntimeError(f"Labels assigned to more than one unified class: {sorted(duplicated)}")
++
++    excluded = sorted(DACL10K_EXCLUDED_FROM_DAMAGE)
++    actually_excluded = sorted(set(DACL10K_CLASSES) - set(mapped))
++    if excluded != actually_excluded:
++        raise RuntimeError(
++            "Excluded DACL10K labels do not match DACL10K_EXCLUDED_FROM_DAMAGE: "
++            f"declared {excluded}, derived {actually_excluded}"
++        )
++
++    if len(mapped) + len(excluded) != len(DACL10K_CLASSES):
++        raise RuntimeError("The 19 -> 6 mapping does not cover every DACL10K class exactly once.")
++
++    if list(groups) != UNIFIED_DAMAGE_CLASSES:
++        raise RuntimeError("Unified channel order does not follow UNIFIED_DAMAGE_CLASSES.")
+--- a/src/data/dacl10k.py
++++ b/src/data/dacl10k.py
+@@ -26,7 +26,13 @@
+ import numpy as np
+ from torch.utils.data import Dataset
+ 
+-from .class_mapping import CRACK_LIKE_DACL10K, DACL10K_CLASS_TO_IDX, DACL10K_CLASSES
++from .class_mapping import (
++    CRACK_LIKE_DACL10K,
++    DACL10K_CLASS_TO_IDX,
++    DACL10K_CLASSES,
++    UNIFIED_DAMAGE_CLASSES,
++    unified_damage_label_to_channel,
++)
+ 
+ 
+ # --------------------------------------------------------------------------- #
+@@ -624,3 +630,358 @@
+ 
+         augmented = self.transform(image=image, mask=mask)
+         return augmented["image"], augmented["mask"].unsqueeze(0).float()
++
++
++# --------------------------------------------------------------------------- #
++# P1ML: multilabel damage-only target (6 independent channels)
++# --------------------------------------------------------------------------- #
++def rasterize_unified_damage(
++    annotation: dict,
++    shape: tuple[int, int] | None = None,
++    ) -> np.ndarray:
++    """Rasterise the 6 unified damage channels into a [6,H,W] uint8 stack.
++
++    Channels are independent and may overlap (a spalling area can be corroded),
++    which is why the target is multilabel and not multiclass. Component labels
++    (Bearing, EJoint, ...) are dropped by the mapping, never folded into a class.
++    """
++    label_to_channel = unified_damage_label_to_channel()
++    n_channels = len(UNIFIED_DAMAGE_CLASSES)
++
++    height, width = shape or (int(annotation["imageHeight"]), int(annotation["imageWidth"]))
++    masks = np.zeros((n_channels, height, width), dtype=np.uint8)
++
++    for shape_dict in annotation.get("shapes", []):
++        channel = label_to_channel.get(shape_dict.get("label"))
++        if channel is not None:
++            _fill(masks[channel], shape_dict.get("points", []))
++
++    return masks
++
++
++def unified_damage_mask_hwc(
++    annotation: dict,
++    shape: tuple[int, int] | None = None,
++    ) -> np.ndarray:
++    """Return the multilabel target as float32 [H,W,6], the layout albumentations expects."""
++    masks = rasterize_unified_damage(annotation, shape=shape)
++    return np.ascontiguousarray(masks.transpose(1, 2, 0)).astype(np.float32)
++
++
++def _pad_to_minimum_size_multilabel(
++    image: np.ndarray,
++    mask: np.ndarray,
++    patch_size: int,
++    ) -> tuple[np.ndarray, np.ndarray]:
++    """Pad aligned image and [H,W,C] multilabel mask so a native crop is always valid.
++
++    `cv2.copyMakeBorder` is limited to at most 4 channels, so the mask is padded
++    with `np.pad` (zeros = "no damage annotated", which is the correct padding
++    semantics for every channel).
++    """
++    height, width = image.shape[:2]
++    pad_bottom = max(patch_size - height, 0)
++    pad_right = max(patch_size - width, 0)
++
++    if pad_bottom == 0 and pad_right == 0:
++        return image, mask
++
++    image = cv2.copyMakeBorder(
++        image,
++        top=0,
++        bottom=pad_bottom,
++        left=0,
++        right=pad_right,
++        borderType=cv2.BORDER_REFLECT_101,
++    )
++    mask = np.pad(
++        mask,
++        ((0, pad_bottom), (0, pad_right), (0, 0)),
++        mode="constant",
++        constant_values=0.0,
++    )
++    return image, mask
++
++
++def _union_positive_pixels(mask_hwc: np.ndarray) -> int:
++    """Number of pixels positive in at least one of the 6 damage channels."""
++    return int((mask_hwc.max(axis=2) > 0).sum())
++
++
++def multilabel_sample_targets(
++    samples: list[tuple[Path, Path]],
++    ) -> list[list[int]]:
++    """Return per-image presence flags for the 6 unified damage classes."""
++    label_to_channel = unified_damage_label_to_channel()
++    n_channels = len(UNIFIED_DAMAGE_CLASSES)
++    targets = []
++
++    for _, annotation_path in samples:
++        annotation = load_annotation(annotation_path)
++        present = [0] * n_channels
++
++        for shape_dict in annotation.get("shapes", []):
++            channel = label_to_channel.get(shape_dict.get("label"))
++            if channel is not None and len(shape_dict.get("points", [])) >= 3:
++                present[channel] = 1
++
++        targets.append(present)
++
++    return targets
++
++
++def summarize_multilabel_targets(targets: list[list[int]]) -> dict:
++    """Image-level composition of a split for the 6 unified damage classes."""
++    if not targets:
++        raise ValueError("Cannot summarize an empty DACL10K split.")
++
++    n_images = len(targets)
++    per_class = {
++        name: int(sum(row[channel] for row in targets))
++        for channel, name in enumerate(UNIFIED_DAMAGE_CLASSES)
++    }
++
++    n_any = int(sum(1 for row in targets if any(row)))
++
++    return {
++        "n_images": n_images,
++        "n_images_with_any_damage": n_any,
++        "n_images_without_any_damage": n_images - n_any,
++        "n_images_per_class": per_class,
++        "image_fraction_per_class": {
++            name: count / n_images for name, count in per_class.items()
++        },
++        "mean_classes_per_image": sum(sum(row) for row in targets) / n_images,
++    }
++
++
++class Dacl10kMultilabelPatchDataset(Dataset):
++    """Native-resolution multilabel patches with a guaranteed positive quota.
++
++    Identical sampling contract to `Dacl10kCrackPatchDataset`, with one
++    difference that matters for P1ML: a patch is *positive* when it contains at
++    least `min_positive_pixels` pixels positive in the **union** of the 6 damage
++    channels. A crack-only criterion would starve the five non-crack channels.
++
++    Hard-negative mining is deliberately not supported here: the P1-B3 pool was
++    mined by a binary crack model and would bias the multilabel negatives.
++    """
++
++    def __init__(
++        self,
++        samples: list[tuple[Path, Path]],
++        transform,
++        patch_size: int,
++        positive_patch_fraction: float = 0.70,
++        min_positive_pixels: int = 256,
++        max_negative_pixels: int = 0,
++        max_crop_attempts: int = 100,
++        patches_per_image: int = 4,
++    ) -> None:
++        if patch_size <= 0:
++            raise ValueError("patch_size must be positive.")
++        if not 0.0 < positive_patch_fraction < 1.0:
++            raise ValueError("positive_patch_fraction must be strictly in (0, 1).")
++        if min_positive_pixels < 1:
++            raise ValueError("min_positive_pixels must be >= 1.")
++        if max_negative_pixels < 0:
++            raise ValueError("max_negative_pixels must be >= 0.")
++        if max_crop_attempts < 1:
++            raise ValueError("max_crop_attempts must be >= 1.")
++        if patches_per_image < 1:
++            raise ValueError("patches_per_image must be >= 1.")
++
++        self.samples = samples
++        self.transform = transform
++        self.patch_size = int(patch_size)
++        self.positive_patch_fraction = float(positive_patch_fraction)
++        self.min_positive_pixels = int(min_positive_pixels)
++        self.max_negative_pixels = int(max_negative_pixels)
++        self.max_crop_attempts = int(max_crop_attempts)
++        self.patches_per_image = int(patches_per_image)
++        self.n_channels = len(UNIFIED_DAMAGE_CLASSES)
++
++        self.positive_sample_indices = self._find_positive_sample_indices()
++        positive_set = set(self.positive_sample_indices)
++        self.negative_sample_indices = [
++            index for index in range(len(self.samples)) if index not in positive_set
++        ]
++
++        if not self.positive_sample_indices:
++            raise RuntimeError(
++                "No DACL10K image can produce a positive multilabel patch with at least "
++                f"{self.min_positive_pixels} damage pixels."
++            )
++
++        # Almost every DACL10K image carries some damage (Weathering alone covers a
++        # large share of the split), so a pool of fully damage-free images can be
++        # empty. Negatives are then cropped from annotated images, where empty
++        # regions are abundant.
++        self.negative_source_indices = self.negative_sample_indices or list(
++            range(len(self.samples))
++        )
++        if not self.negative_sample_indices:
++            print(
++                "[patch-dataset] no damage-free image in this split: negative patches "
++                "will be cropped from annotated images (union-empty regions)."
++            )
++
++        self.n_patches = len(self.samples) * self.patches_per_image
++        self.n_positive_patches = round(self.n_patches * self.positive_patch_fraction)
++        self.n_negative_patches = self.n_patches - self.n_positive_patches
++
++        print(
++            "[patch-dataset] multilabel composition | "
++            f"total={self.n_patches} | positive={self.n_positive_patches} | "
++            f"negative={self.n_negative_patches} | "
++            f"positive source images={len(self.positive_sample_indices)} | "
++            f"damage-free images={len(self.negative_sample_indices)}"
++        )
++
++    def _find_positive_sample_indices(self) -> list[int]:
++        """Images whose full-resolution union mask holds enough damage pixels.
++
++        Only the JSON annotations are decoded here, never the JPEGs. As in the
++        binary dataset this is a necessary but not sufficient condition for a
++        single crop, which `_positive_crop` handles statistically.
++        """
++        positive_indices = []
++
++        for index, (_, annotation_path) in enumerate(self.samples):
++            annotation = load_annotation(annotation_path)
++            masks = rasterize_unified_damage(annotation)
++
++            if int((masks.max(axis=0) > 0).sum()) >= self.min_positive_pixels:
++                positive_indices.append(index)
++
++        return positive_indices
++
++    def __len__(self) -> int:
++        return self.n_patches
++
++    def _load_sample(self, sample_index: int) -> tuple[np.ndarray, np.ndarray]:
++        image_path, annotation_path = self.samples[sample_index]
++
++        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
++        if image is None:
++            raise RuntimeError(f"Unreadable image: {image_path}")
++        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
++
++        annotation = load_annotation(annotation_path)
++        mask = unified_damage_mask_hwc(annotation, shape=image.shape[:2])
++
++        return _pad_to_minimum_size_multilabel(image, mask, self.patch_size)
++
++    def _random_crop(self, image: np.ndarray, mask: np.ndarray):
++        height, width = image.shape[:2]
++        top = np.random.randint(0, height - self.patch_size + 1)
++        left = np.random.randint(0, width - self.patch_size + 1)
++        return _crop_at(image, mask, top, left, self.patch_size)
++
++    def _positive_crop(self, image: np.ndarray, mask: np.ndarray):
++        """Return a damage-anchored crop, falling back to the richest one found."""
++        union = mask.max(axis=2)
++        damage_y, damage_x = np.where(union > 0)
++        if len(damage_y) == 0:
++            raise RuntimeError("Positive source image unexpectedly has an empty damage mask.")
++
++        height, width = image.shape[:2]
++        best_patch, best_pixels = None, -1
++
++        for _ in range(self.max_crop_attempts):
++            anchor_index = np.random.randint(len(damage_y))
++            center_y, center_x = int(damage_y[anchor_index]), int(damage_x[anchor_index])
++
++            top = np.random.randint(
++                max(0, center_y - self.patch_size + 1),
++                min(center_y, height - self.patch_size) + 1,
++            )
++            left = np.random.randint(
++                max(0, center_x - self.patch_size + 1),
++                min(center_x, width - self.patch_size) + 1,
++            )
++
++            image_patch, mask_patch = _crop_at(image, mask, top, left, self.patch_size)
++            n_positive = _union_positive_pixels(mask_patch)
++
++            if n_positive >= self.min_positive_pixels:
++                return image_patch, mask_patch
++            if n_positive > best_pixels:
++                best_patch, best_pixels = (image_patch, mask_patch), n_positive
++
++        return best_patch
++
++    def _negative_crop(self, image: np.ndarray, mask: np.ndarray):
++        """Return a crop with no damage pixels in any channel, whenever possible."""
++        best_patch, best_pixels = None, None
++
++        for _ in range(self.max_crop_attempts):
++            image_patch, mask_patch = self._random_crop(image, mask)
++            n_positive = _union_positive_pixels(mask_patch)
++
++            if n_positive <= self.max_negative_pixels:
++                return image_patch, mask_patch
++            if best_pixels is None or n_positive < best_pixels:
++                best_patch, best_pixels = (image_patch, mask_patch), n_positive
++
++        return best_patch
++
++    def __getitem__(self, index: int):
++        if index < self.n_positive_patches:
++            sample_index = int(np.random.choice(self.positive_sample_indices))
++            image, mask = self._load_sample(sample_index)
++            image_patch, mask_patch = self._positive_crop(image, mask)
++        else:
++            sample_index = int(np.random.choice(self.negative_source_indices))
++            image, mask = self._load_sample(sample_index)
++            image_patch, mask_patch = self._negative_crop(image, mask)
++
++        augmented = self.transform(image=image_patch, mask=mask_patch)
++        # transpose_mask=True in the multilabel transforms already yields [C,H,W].
++        return augmented["image"], augmented["mask"].float()
++
++
++class Dacl10kMultilabelCenterPatchDataset(Dataset):
++    """One deterministic damage-centred patch per image, for training-time monitoring."""
++
++    def __init__(
++        self,
++        samples: list[tuple[Path, Path]],
++        transform,
++        patch_size: int,
++    ) -> None:
++        self.samples = samples
++        self.transform = transform
++        self.patch_size = int(patch_size)
++        self.n_channels = len(UNIFIED_DAMAGE_CLASSES)
++
++    def __len__(self) -> int:
++        return len(self.samples)
++
++    def __getitem__(self, index: int):
++        image_path, annotation_path = self.samples[index]
++
++        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
++        if image is None:
++            raise RuntimeError(f"Unreadable image: {image_path}")
++        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
++
++        annotation = load_annotation(annotation_path)
++        mask = unified_damage_mask_hwc(annotation, shape=image.shape[:2])
++        image, mask = _pad_to_minimum_size_multilabel(image, mask, self.patch_size)
++
++        height, width = image.shape[:2]
++        union = mask.max(axis=2)
++        damage_y, damage_x = np.where(union > 0)
++
++        if len(damage_y) > 0:
++            center_y, center_x = int(damage_y.mean()), int(damage_x.mean())
++        else:
++            center_y, center_x = height // 2, width // 2
++
++        top = int(np.clip(center_y - self.patch_size // 2, 0, height - self.patch_size))
++        left = int(np.clip(center_x - self.patch_size // 2, 0, width - self.patch_size))
++
++        image_patch, mask_patch = _crop_at(image, mask, top, left, self.patch_size)
++        augmented = self.transform(image=image_patch, mask=mask_patch)
++        return augmented["image"], augmented["mask"].float()
+--- a/src/data/transforms.py
++++ b/src/data/transforms.py
+@@ -90,4 +90,47 @@
+             A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+             ToTensorV2(),
+         ]
+-    )
+\ No newline at end of file
++    )
++
++# --------------------------------------------------------------------------- #
++# P1ML: multilabel patches
++# --------------------------------------------------------------------------- #
++# Two differences w.r.t. the binary patch pipelines:
++#   * masks are [H,W,6] stacks, so ToTensorV2(transpose_mask=True) is required to
++#     obtain the [6,H,W] layout the loss and the metrics expect;
++#   * every geometric op resamples the mask with nearest neighbour
++#     (mask_interpolation=cv2.INTER_NEAREST), otherwise bilinear interpolation
++#     would produce non-binary targets and silently corrupt per-class Dice.
++def patch_train_transform_multilabel() -> A.Compose:
++    """Augmentations for an extracted native-resolution multilabel patch."""
++    return A.Compose(
++        [
++            A.HorizontalFlip(p=0.5),
++            A.VerticalFlip(p=0.2),
++            A.RandomRotate90(p=0.5),
++            A.Affine(
++                translate_percent=(-0.05, 0.05),
++                scale=(0.85, 1.15),
++                rotate=(-15, 15),
++                border_mode=cv2.BORDER_CONSTANT,
++                interpolation=cv2.INTER_LINEAR,
++                mask_interpolation=cv2.INTER_NEAREST,
++                p=0.5,
++            ),
++            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
++            A.RandomGamma(gamma_limit=(80, 120), p=0.3),
++            A.GaussNoise(p=0.2),
++            A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
++            ToTensorV2(transpose_mask=True),
++        ]
++    )
++
++
++def patch_eval_transform_multilabel() -> A.Compose:
++    """Deterministic normalization for multilabel patches ([H,W,6] -> [6,H,W])."""
++    return A.Compose(
++        [
++            A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
++            ToTensorV2(transpose_mask=True),
++        ]
++    )
+--- a/src/data/stats.py
++++ b/src/data/stats.py
+@@ -14,8 +14,13 @@
+ from PIL import Image
+ from tqdm.auto import tqdm
+ 
+-from .class_mapping import DACL10K_CLASSES, DACL10K_DAMAGE
+-from .dacl10k import load_annotation, present_labels, rasterize_binary
++from .class_mapping import DACL10K_CLASSES, DACL10K_DAMAGE, UNIFIED_DAMAGE_CLASSES
++from .dacl10k import (
++    load_annotation,
++    present_labels,
++    rasterize_binary,
++    rasterize_unified_damage,
++)
+ 
+ 
+ # --------------------------------------------------------------------------- #
+@@ -128,3 +133,119 @@
+     """Compact summary (count/mean/std/min/quartiles/max) for selected columns."""
+     available = [c for c in columns if c in df]
+     return df[available].describe(percentiles=[0.25, 0.5, 0.75, 0.95]).T
++
++
++# --------------------------------------------------------------------------- #
++# P1ML: per-channel pixel statistics and pos_weight vector
++# --------------------------------------------------------------------------- #
++def dacl10k_multilabel_pixel_stats(
++    samples: list[tuple[Path, Path]],
++    max_images: int | None = None,
++    seed: int = 42,
++    ) -> dict:
++    """Pixel-level frequency of the 6 unified damage classes.
++
++    Computed on the official DACL10K **train** split only: using validation
++    pixels to set the loss weights would leak the evaluation distribution into
++    the objective. Masks are rasterised at native resolution, so the ratios match
++    exactly what the patch sampler will see.
++
++    `max_images` subsamples the split (reproducibly) when a full pass is too
++    expensive; the value is recorded in the returned dictionary so the weights
++    remain traceable.
++    """
++    if not samples:
++        raise ValueError("Cannot compute class statistics on an empty split.")
++
++    if max_images and max_images < len(samples):
++        rng = np.random.default_rng(seed)
++        indices = sorted(rng.choice(len(samples), size=max_images, replace=False).tolist())
++        selected = [samples[i] for i in indices]
++    else:
++        selected = list(samples)
++
++    n_classes = len(UNIFIED_DAMAGE_CLASSES)
++    positive_pixels = np.zeros(n_classes, dtype=np.float64)
++    images_present = np.zeros(n_classes, dtype=np.int64)
++    total_pixels = 0.0
++    union_positive_pixels = 0.0
++
++    for _, annotation_path in tqdm(selected, desc="EDA dacl10k multilabel"):
++        annotation = load_annotation(annotation_path)
++        masks = rasterize_unified_damage(annotation) > 0
++
++        total_pixels += float(masks.shape[1] * masks.shape[2])
++        union_positive_pixels += float(masks.any(axis=0).sum())
++
++        for channel in range(n_classes):
++            count = float(masks[channel].sum())
++            positive_pixels[channel] += count
++            images_present[channel] += int(count > 0)
++
++    return {
++        "split_size": len(samples),
++        "n_images_used": len(selected),
++        "max_images": max_images,
++        "seed": seed,
++        "class_names": list(UNIFIED_DAMAGE_CLASSES),
++        "total_pixels": total_pixels,
++        "union_positive_pixels": union_positive_pixels,
++        "union_positive_fraction": union_positive_pixels / max(total_pixels, 1.0),
++        "positive_pixels": positive_pixels.tolist(),
++        "negative_pixels": (total_pixels - positive_pixels).tolist(),
++        "positive_fraction": (positive_pixels / max(total_pixels, 1.0)).tolist(),
++        "n_images_present": images_present.tolist(),
++    }
++
++
++def multilabel_pos_weights(
++    stats: dict,
++    clip_min: float = 1.0,
++    clip_max: float = 20.0,
++    ) -> dict:
++    """Turn per-channel pixel statistics into a clipped pos_weight vector.
++
++    For each channel c the unclipped value is the inverse positive prior
++
++        w_c = N_neg,c / N_pos,c ,
++
++    i.e. the weight that equalises the contribution of positive and negative
++    pixels in BCEWithLogits. Raw values reach O(10^3) for `delamination`, which
++    makes the gradient explode and the model predict everything as damage, hence
++    the clipping to [clip_min, clip_max]; both raw and clipped values are kept so
++    the thesis can report how much each channel was capped.
++    """
++    if clip_max < clip_min:
++        raise ValueError("clip_max must be >= clip_min.")
++
++    positive = np.asarray(stats["positive_pixels"], dtype=np.float64)
++    negative = np.asarray(stats["negative_pixels"], dtype=np.float64)
++
++    if (positive <= 0).any():
++        empty = [
++            name
++            for name, count in zip(stats["class_names"], positive.tolist())
++            if count <= 0
++        ]
++        raise RuntimeError(
++            f"Classes with zero positive pixels in the train split: {empty}. "
++            "pos_weight would be undefined."
++        )
++
++    raw = negative / positive
++    clipped = np.clip(raw, clip_min, clip_max)
++
++    return {
++        "class_names": list(stats["class_names"]),
++        "pos_weight_raw": raw.tolist(),
++        "pos_weight": clipped.tolist(),
++        "clip_min": float(clip_min),
++        "clip_max": float(clip_max),
++        "n_clipped": int((raw > clip_max).sum() + (raw < clip_min).sum()),
++        "source": {
++            "split_size": stats["split_size"],
++            "n_images_used": stats["n_images_used"],
++            "positive_fraction": stats["positive_fraction"],
++            "n_images_present": stats["n_images_present"],
++        },
++    }
+--- a/src/losses.py
++++ b/src/losses.py
+@@ -7,6 +7,8 @@
+ 
+ from __future__ import annotations
+ 
++from collections.abc import Sequence
++
+ import torch
+ import torch.nn as nn
+ import torch.nn.functional as F
+@@ -205,3 +207,97 @@
+     raise ValueError(
+         f"Unknown loss.name='{name}'. Supported: 'bce_dice', 'focal_dice'."
+     )
++
++
++# --------------------------------------------------------------------------- #
++# P1ML: multilabel (independent channels)
++# --------------------------------------------------------------------------- #
++class MultilabelSoftDiceLoss(nn.Module):
++    """Soft Dice computed per (sample, channel) and averaged.
++
++    The binary `SoftDiceLoss` flattens from dim 1 onwards, so with C>1 it would
++    collapse the six channels into a single region and let `surface` (very
++    frequent) dominate `delamination` (rare). Here the overlap is measured
++    channel-wise, which is the multilabel formulation:
++
++        L = 1 - (1/BC) * sum_{b,c} (2*|p_bc ∩ y_bc| + eps) / (|p_bc| + |y_bc| + eps)
++    """
++
++    def __init__(self, eps: float = 1.0) -> None:
++        super().__init__()
++        self.eps = eps
++
++    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
++        probability = torch.sigmoid(logits.float())
++        targets = targets.float()
++
++        batch, channels = probability.shape[0], probability.shape[1]
++        probability = probability.reshape(batch, channels, -1)
++        targets = targets.reshape(batch, channels, -1)
++
++        intersection = (probability * targets).sum(dim=2)
++        cardinality = probability.sum(dim=2) + targets.sum(dim=2)
++        dice = (2.0 * intersection + self.eps) / (cardinality + self.eps)
++
++        return 1.0 - dice.mean()
++
++
++class MultilabelBceDiceLoss(nn.Module):
++    """Per-channel weighted BCEWithLogits + per-channel Soft Dice.
++
++    `pos_weight` is a vector of length C (one value per unified damage class),
++    estimated on the official DACL10K train split only. Sigmoid + BCE keeps the
++    channels independent: no softmax, no CrossEntropy, so overlapping damages
++    (e.g. corrosion inside a spalling area) remain representable.
++    """
++
++    def __init__(
++        self,
++        pos_weight: Sequence[float] | torch.Tensor,
++        bce_weight: float = 0.5,
++        dice_weight: float = 0.5,
++    ) -> None:
++        super().__init__()
++        weight = torch.as_tensor(pos_weight, dtype=torch.float32).flatten()
++        if weight.numel() < 1:
++            raise ValueError("pos_weight must contain one value per channel.")
++
++        # Shape [C,1,1] broadcasts against logits [B,C,H,W].
++        self.register_buffer("pos_weight", weight.view(-1, 1, 1))
++        self.bce_weight = float(bce_weight)
++        self.dice_weight = float(dice_weight)
++        self.dice = MultilabelSoftDiceLoss()
++
++    @property
++    def n_channels(self) -> int:
++        return int(self.pos_weight.numel())
++
++    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
++        if logits.shape[1] != self.n_channels:
++            raise ValueError(
++                f"Model emits {logits.shape[1]} channels but pos_weight has "
++                f"{self.n_channels} entries."
++            )
++        if logits.shape != targets.shape:
++            raise ValueError(f"Shape mismatch: logits {tuple(logits.shape)} vs targets {tuple(targets.shape)}.")
++
++        bce = F.binary_cross_entropy_with_logits(
++            logits.float(), targets.float(), pos_weight=self.pos_weight
++        )
++        return self.bce_weight * bce + self.dice_weight * self.dice(logits, targets)
++
++
++def build_multilabel_loss(cfg, pos_weight: Sequence[float]) -> nn.Module:
++    """Factory for the P1ML loss. `build_loss` is left untouched for P0-P3."""
++    name = str(cfg.loss.name).lower()
++    if name not in {"multilabel_bce_dice", "bce_dice"}:
++        raise ValueError(
++            f"Unsupported multilabel loss '{cfg.loss.name}'. P1ML supports "
++            "'multilabel_bce_dice' only (focal variants are out of scope)."
++        )
++
++    return MultilabelBceDiceLoss(
++        pos_weight=pos_weight,
++        bce_weight=float(cfg.loss.bce_weight),
++        dice_weight=float(cfg.loss.dice_weight),
++    )
+--- a/src/eval/sliding_window.py
++++ b/src/eval/sliding_window.py
+@@ -120,4 +120,80 @@
+             weight_sum[:, :, top : top + patch_size, left : left + patch_size] += blend
+ 
+     probability_map = probability_sum / weight_sum.clamp_min(1e-8)
+-    return probability_map[0, 0, :original_height, :original_width].cpu()
+\ No newline at end of file
++    return probability_map[0, 0, :original_height, :original_width].cpu()
++
++@torch.no_grad()
++def predict_sliding_window_multilabel(
++    model,
++    image: np.ndarray,
++    device: torch.device,
++    patch_size: int,
++    stride: int,
++    batch_size: int,
++    mean: tuple[float, float, float],
++    std: tuple[float, float, float],
++    n_classes: int,
++    blend_mode: str = "gaussian",
++) -> torch.Tensor:
++    """Return a full-resolution multilabel probability map [C,H,W].
++
++    Same geometry, padding and Gaussian fusion as `predict_sliding_window`: only
++    the accumulators carry C channels, and the sigmoid is applied per channel
++    (independent classes, never softmax across them).
++    """
++    if image.ndim != 3 or image.shape[2] != 3:
++        raise ValueError(f"Expected RGB image [H,W,3], got shape {image.shape}.")
++    if patch_size <= 0 or stride <= 0 or batch_size <= 0:
++        raise ValueError("patch_size, stride and batch_size must be positive.")
++    if n_classes <= 0:
++        raise ValueError("n_classes must be positive.")
++
++    original_height, original_width = image.shape[:2]
++    pad_bottom = max(patch_size - original_height, 0)
++    pad_right = max(patch_size - original_width, 0)
++
++    if pad_bottom or pad_right:
++        image = np.pad(image, ((0, pad_bottom), (0, pad_right), (0, 0)), mode="reflect")
++
++    height, width = image.shape[:2]
++    top_positions = _sliding_positions(height, patch_size, stride)
++    left_positions = _sliding_positions(width, patch_size, stride)
++
++    coordinates = [(top, left) for top in top_positions for left in left_positions]
++    blend = _blend_window(patch_size, blend_mode).to(device)
++
++    probability_sum = torch.zeros(
++        (1, n_classes, height, width), dtype=torch.float32, device=device
++    )
++    weight_sum = torch.zeros((1, 1, height, width), dtype=torch.float32, device=device)
++
++    model.eval()
++    for start in range(0, len(coordinates), batch_size):
++        batch_coordinates = coordinates[start : start + batch_size]
++        patches = [
++            _normalize_patch(
++                image[top : top + patch_size, left : left + patch_size],
++                mean=mean,
++                std=std,
++            )
++            for top, left in batch_coordinates
++        ]
++
++        batch = torch.stack(patches, dim=0).to(device, non_blocking=True)
++        logits = model(batch)
++
++        if logits.shape[1] != n_classes:
++            raise ValueError(
++                f"Model emits {logits.shape[1]} channels but n_classes={n_classes}."
++            )
++
++        probabilities = torch.sigmoid(logits.float())
++
++        for probability, (top, left) in zip(probabilities, batch_coordinates):
++            probability_sum[:, :, top : top + patch_size, left : left + patch_size] += (
++                probability.unsqueeze(0) * blend
++            )
++            weight_sum[:, :, top : top + patch_size, left : left + patch_size] += blend
++
++    probability_map = probability_sum / weight_sum.clamp_min(1e-8)
++    return probability_map[0, :, :original_height, :original_width].cpu()
+--- a/src/engine.py
++++ b/src/engine.py
+@@ -238,8 +238,25 @@
+ # --------------------------------------------------------------------------- #
+ # Full training run
+ # --------------------------------------------------------------------------- #
+-def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Path) -> dict:
+-    """Train with SGDR + early stopping. Returns the best validation metrics."""
++def fit(
++    model,
++    train_loader,
++    val_loader,
++    criterion,
++    cfg,
++    device,
++    output_dir: Path,
++    evaluate_fn=None,
++    selection_metric: str = "dice",
++    extra_history_keys: tuple[str, ...] = (),
++) -> dict:
++    """Train with SGDR + early stopping. Returns the best validation metrics.
++
++    `evaluate_fn`, `selection_metric` and `extra_history_keys` default to the
++    binary behaviour used by P0-P3. The multilabel pipeline (P1ML) passes
++    `evaluate_multilabel` and selects on `macro_dice_present`.
++    """
++    evaluate_fn = evaluate_fn or evaluate
+     output_dir = ensure_dir(output_dir)
+     last_path, best_path = output_dir / "last.pt", output_dir / "best.pt"
+     history_path = output_dir / "history.csv"
+@@ -304,7 +321,7 @@
+             model, train_loader, criterion, optimizer, scaler, device,
+             accumulation_steps=cfg.train.accumulation_steps,
+         )
+-        val_metrics = evaluate(model, val_loader, criterion, device, threshold=cfg.eval.threshold)
++        val_metrics = evaluate_fn(model, val_loader, criterion, device, threshold=cfg.eval.threshold)
+         scheduler.step()  # per-epoch stepping matches T_0 expressed in epochs
+ 
+         row = {
+@@ -316,8 +333,10 @@
+             "val_dice": val_metrics["dice"],
+             "val_precision": val_metrics["precision"],
+             "val_recall": val_metrics["recall"],
+-            "seconds": round(time.time() - started, 1),
+         }
++        for key in extra_history_keys:
++            row[f"val_{key}"] = val_metrics[key]
++        row["seconds"] = round(time.time() - started, 1)
+         _append_csv(history_path, row)
+         print(
+             f"epoch {epoch:03d} | train {train_loss:.4f} | val {val_metrics['loss']:.4f} "
+@@ -325,9 +344,19 @@
+             f"| P {val_metrics['precision']:.3f} R {val_metrics['recall']:.3f}"
+         )
+        
+-        improved = val_metrics["dice"] > best_dice
++        if selection_metric not in val_metrics:
++            raise KeyError(
++                f"selection_metric '{selection_metric}' is not returned by the "
++                f"evaluation function. Available: {sorted(val_metrics)}"
++            )
++
++        improved = val_metrics[selection_metric] > best_dice
+         if improved:
+-            best_dice, best_metrics, epochs_without_improvement = val_metrics["dice"], val_metrics, 0
++            best_dice, best_metrics, epochs_without_improvement = (
++                val_metrics[selection_metric],
++                val_metrics,
++                0,
++            )
+         else:
+             epochs_without_improvement += 1
+ 
+@@ -336,7 +365,7 @@
+         if improved:
+             save_checkpoint(best_path, model, optimizer, scheduler, scaler, epoch, best_dice,
+                             epochs_without_improvement)
+-            print(f"  -> new best Dice {best_dice:.4f}, saved {best_path.name}")
++            print(f"  -> new best {selection_metric} {best_dice:.4f}, saved {best_path.name}")
+         elif epochs_without_improvement >= cfg.train.early_stopping_patience:
+             print(f"[fit] early stopping after {epochs_without_improvement} epochs without improvement")
+             break
+@@ -352,3 +381,141 @@
+         if write_header:
+             writer.writeheader()
+         writer.writerow(row)
++
++
++# --------------------------------------------------------------------------- #
++# P1ML: task transfer with an incompatible segmentation head
++# --------------------------------------------------------------------------- #
++def initialize_model_from_checkpoint_partial(
++    model,
++    checkpoint_path: str | Path,
++    device: torch.device | str = "cpu",
++    allowed_missing_prefixes: tuple[str, ...] = ("segmentation_head.",),
++    required_prefixes: tuple[str, ...] = ("encoder.", "decoder."),
++) -> dict[str, Any]:
++    """Initialize encoder + decoder from a checkpoint whose head has a different shape.
++
++    Used for P1-B4 (binary, 1 output channel) -> P1ML (multilabel, 6 channels):
++    the shared representation is transferred, the head is re-initialised from
++    scratch. Contract, deliberately strict:
++
++    * only tensors under `allowed_missing_prefixes` may be skipped, and only when
++      their shape is incompatible; any other omission raises;
++    * every parameter under `required_prefixes` must be transferred, otherwise a
++      silent partial transfer would masquerade as a transfer experiment;
++    * no optimizer / scheduler / scaler / epoch / early-stopping state is read.
++
++    Returns a JSON-serialisable report (also written to the run dir by the
++    training script).
++    """
++    checkpoint_path = Path(checkpoint_path)
++    if not checkpoint_path.is_file():
++        raise FileNotFoundError(f"[transfer] source checkpoint not found: {checkpoint_path.resolve()}")
++
++    checkpoint = torch.load(checkpoint_path, map_location=device)
++    if not isinstance(checkpoint, dict) or "model" not in checkpoint:
++        raise KeyError("[transfer] checkpoint must be a dict containing key 'model'.")
++
++    source_state_dict = checkpoint["model"]
++    target_state_dict = model.state_dict()
++    factory_sha256 = state_dict_sha256(target_state_dict)
++
++    transferred, skipped_shape_mismatch, skipped_absent_in_target = [], [], []
++
++    filtered: dict[str, torch.Tensor] = {}
++    for key, tensor in source_state_dict.items():
++        if key not in target_state_dict:
++            skipped_absent_in_target.append(key)
++            continue
++        if tuple(tensor.shape) != tuple(target_state_dict[key].shape):
++            skipped_shape_mismatch.append(
++                {
++                    "key": key,
++                    "source_shape": list(tensor.shape),
++                    "target_shape": list(target_state_dict[key].shape),
++                }
++            )
++            continue
++        filtered[key] = tensor
++        transferred.append(key)
++
++    def _is_allowed(key: str) -> bool:
++        return any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
++
++    unexpected_mismatch = [
++        entry["key"] for entry in skipped_shape_mismatch if not _is_allowed(entry["key"])
++    ]
++    if unexpected_mismatch:
++        raise RuntimeError(
++            "[transfer] shape mismatch outside the replaceable head: "
++            f"{unexpected_mismatch}"
++        )
++
++    unexpected_absent = [key for key in skipped_absent_in_target if not _is_allowed(key)]
++    if unexpected_absent:
++        raise RuntimeError(
++            f"[transfer] checkpoint keys absent from the target model: {unexpected_absent}"
++        )
++
++    incompatible = model.load_state_dict(filtered, strict=False)
++
++    not_initialized = [
++        key for key in incompatible.missing_keys if not _is_allowed(key)
++    ]
++    if not_initialized:
++        raise RuntimeError(
++            f"[transfer] parameters left at factory initialization: {not_initialized}"
++        )
++    if incompatible.unexpected_keys:
++        raise RuntimeError(
++            f"[transfer] unexpected keys after filtering: {incompatible.unexpected_keys}"
++        )
++
++    # Every encoder/decoder parameter must have been overwritten.
++    for prefix in required_prefixes:
++        required = [key for key in target_state_dict if key.startswith(prefix)]
++        missing = sorted(set(required) - set(transferred))
++        if not required:
++            raise RuntimeError(f"[transfer] target model has no parameter under '{prefix}'.")
++        if missing:
++            raise RuntimeError(
++                f"[transfer] incomplete transfer for '{prefix}': {len(missing)} tensors "
++                f"not loaded, e.g. {missing[:5]}"
++            )
++
++    initialized_sha256 = state_dict_sha256(model.state_dict())
++    if initialized_sha256 == factory_sha256:
++        raise RuntimeError(
++            "[transfer] model weights unchanged after the partial load: nothing was transferred."
++        )
++
++    report = {
++        "mode": "partial_encoder_decoder_head_reinit",
++        "checkpoint_path": str(checkpoint_path.resolve()),
++        "checkpoint_epoch": checkpoint.get("epoch"),
++        "checkpoint_best_metric": checkpoint.get("best_dice"),
++        "n_source_tensors": len(source_state_dict),
++        "n_target_tensors": len(target_state_dict),
++        "n_transferred_tensors": len(transferred),
++        "reinitialized_head_tensors": [entry["key"] for entry in skipped_shape_mismatch],
++        "head_shape_changes": skipped_shape_mismatch,
++        "skipped_absent_in_target": skipped_absent_in_target,
++        "allowed_missing_prefixes": list(allowed_missing_prefixes),
++        "required_prefixes": list(required_prefixes),
++        "factory_model_sha256": factory_sha256,
++        "initialized_model_sha256": initialized_sha256,
++        "restored_optimizer_state": False,
++        "restored_scheduler_state": False,
++        "restored_scaler_state": False,
++        "restored_epoch": False,
++        "restored_early_stopping_state": False,
++    }
++
++    print(
++        f"[transfer] partial load from {checkpoint_path.name}: "
++        f"{len(transferred)}/{len(target_state_dict)} tensors transferred | "
++        f"head re-initialised: {report['reinitialized_head_tensors']}"
++    )
++    print(f"[transfer] SHA-256={initialized_sha256}")
++
++    return report
