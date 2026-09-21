@@ -1,8 +1,7 @@
 """Exploratory data analysis: the numbers that justify the experimental design.
 
 Everything returns a pandas DataFrame so the scripts only handle IO/plots.
-Image headers are read without decoding pixels when possible (PIL lazy open),
-which keeps a full pass over ~10k images in the order of seconds.
+Image headers are read without decoding pixels when possible (PIL lazy open), which keeps a full pass over ~10k images in the order of seconds.
 """
 
 from __future__ import annotations
@@ -14,8 +13,13 @@ import pandas as pd
 from PIL import Image
 from tqdm.auto import tqdm
 
-from .class_mapping import DACL10K_CLASSES, DACL10K_DAMAGE
-from .dacl10k import load_annotation, present_labels, rasterize_binary
+from .class_mapping import DACL10K_CLASSES, DACL10K_DAMAGE, UNIFIED_DAMAGE_CLASSES
+from .dacl10k import (
+    load_annotation,
+    present_labels,
+    rasterize_binary,
+    rasterize_unified_damage,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -128,3 +132,115 @@ def describe_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     """Compact summary (count/mean/std/min/quartiles/max) for selected columns."""
     available = [c for c in columns if c in df]
     return df[available].describe(percentiles=[0.25, 0.5, 0.75, 0.95]).T
+
+
+# --------------------------------------------------------------------------- #
+# P1ML: per-channel pixel statistics and pos_weight vector
+# --------------------------------------------------------------------------- #
+def dacl10k_multilabel_pixel_stats(
+    samples: list[tuple[Path, Path]],
+    max_images: int | None = None,
+    seed: int = 42,
+    ) -> dict:
+    """Pixel-level frequency of the 6 unified damage classes.
+
+    Computed on the official DACL10K **train** split only: using validation pixels to set the loss weights would leak the evaluation distribution into the objective. Masks are rasterised at native resolution, so the ratios match
+    exactly what the patch sampler will see.
+
+    `max_images` subsamples the split (reproducibly) when a full pass is too expensive; the value is recorded in the returned dictionary so the weights remain traceable.
+    """
+    if not samples:
+        raise ValueError("Cannot compute class statistics on an empty split.")
+
+    if max_images and max_images < len(samples):
+        rng = np.random.default_rng(seed)
+        indices = sorted(rng.choice(len(samples), size=max_images, replace=False).tolist())
+        selected = [samples[i] for i in indices]
+    else:
+        selected = list(samples)
+
+    n_classes = len(UNIFIED_DAMAGE_CLASSES)
+    positive_pixels = np.zeros(n_classes, dtype=np.float64)
+    images_present = np.zeros(n_classes, dtype=np.int64)
+    total_pixels = 0.0
+    union_positive_pixels = 0.0
+
+    for _, annotation_path in tqdm(selected, desc="EDA dacl10k multilabel"):
+        annotation = load_annotation(annotation_path)
+        masks = rasterize_unified_damage(annotation) > 0
+
+        total_pixels += float(masks.shape[1] * masks.shape[2])
+        union_positive_pixels += float(masks.any(axis=0).sum())
+
+        for channel in range(n_classes):
+            count = float(masks[channel].sum())
+            positive_pixels[channel] += count
+            images_present[channel] += int(count > 0)
+
+    return {
+        "split_size": len(samples),
+        "n_images_used": len(selected),
+        "max_images": max_images,
+        "seed": seed,
+        "class_names": list(UNIFIED_DAMAGE_CLASSES),
+        "total_pixels": total_pixels,
+        "union_positive_pixels": union_positive_pixels,
+        "union_positive_fraction": union_positive_pixels / max(total_pixels, 1.0),
+        "positive_pixels": positive_pixels.tolist(),
+        "negative_pixels": (total_pixels - positive_pixels).tolist(),
+        "positive_fraction": (positive_pixels / max(total_pixels, 1.0)).tolist(),
+        "n_images_present": images_present.tolist(),
+    }
+
+
+def multilabel_pos_weights(
+    stats: dict,
+    clip_min: float = 1.0,
+    clip_max: float = 20.0,
+    ) -> dict:
+    """Turn per-channel pixel statistics into a clipped pos_weight vector.
+
+    For each channel c the unclipped value is the inverse positive prior
+
+        w_c = N_neg,c / N_pos,c ,
+
+    i.e. the weight that equalises the contribution of positive and negative
+    pixels in BCEWithLogits. Raw values reach O(10^3) for `delamination`, which
+    makes the gradient explode and the model predict everything as damage, hence
+    the clipping to [clip_min, clip_max]; both raw and clipped values are kept so
+    the thesis can report how much each channel was capped.
+    """
+    if clip_max < clip_min:
+        raise ValueError("clip_max must be >= clip_min.")
+
+    positive = np.asarray(stats["positive_pixels"], dtype=np.float64)
+    negative = np.asarray(stats["negative_pixels"], dtype=np.float64)
+
+    if (positive <= 0).any():
+        empty = [
+            name
+            for name, count in zip(stats["class_names"], positive.tolist())
+            if count <= 0
+        ]
+        raise RuntimeError(
+            f"Classes with zero positive pixels in the train split: {empty}. "
+            "pos_weight would be undefined."
+        )
+
+    raw = negative / positive
+    clipped = np.clip(raw, clip_min, clip_max)
+
+    return {
+        "class_names": list(stats["class_names"]),
+        "pos_weight_raw": raw.tolist(),
+        "pos_weight": clipped.tolist(),
+        "clip_min": float(clip_min),
+        "clip_max": float(clip_max),
+        "n_clipped": int((raw > clip_max).sum() + (raw < clip_min).sum()),
+        "source": {
+            "split_size": stats["split_size"],
+            "n_images_used": stats["n_images_used"],
+            "positive_fraction": stats["positive_fraction"],
+            "n_images_present": stats["n_images_present"],
+        },
+    }

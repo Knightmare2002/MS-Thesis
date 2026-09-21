@@ -117,28 +117,61 @@ def select_qualitative_indices(targets: list[list[int]], n_samples: int) -> list
     return chosen[:n_samples]
 
 
-def colorize(mask: np.ndarray) -> np.ndarray:
-    """Render a [6,H,W] binary stack as an RGB image (last positive channel wins)."""
-    height, width = mask.shape[1:]
-    canvas = np.zeros((height, width, 3), dtype=np.uint8)
-    for channel, name in enumerate(UNIFIED_DAMAGE_CLASSES):
-        canvas[mask[channel] > 0.5] = CLASS_COLORS[name]
-    return canvas
+def _overlay_single_channel(
+    image: np.ndarray,
+    mask: np.ndarray,
+    color: tuple[int, int, int],
+    alpha: float = 0.50,
+) -> np.ndarray:
+    """Overlay one binary channel on an RGB image without hiding other channels.
 
+    The caller invokes this function separately for each multilabel channel,
+    therefore overlapping labels remain visible in their respective panels.
+    """
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"Expected RGB image [H,W,3], got {image.shape}.")
+    if mask.shape != image.shape[:2]:
+        raise ValueError(
+            f"Mask/image spatial mismatch: mask {mask.shape}, image {image.shape[:2]}."
+        )
+
+    overlay = image.copy()
+    positive = mask > 0.5
+    color_array = np.asarray(color, dtype=np.float32)
+
+    overlay[positive] = (
+        (1.0 - alpha) * overlay[positive].astype(np.float32)
+        + alpha * color_array
+    ).astype(np.uint8)
+
+    return overlay
 
 @torch.no_grad()
 def save_qualitative_figure(model, samples, targets, cfg, device, threshold, out_path) -> None:
-    """Save full-resolution multilabel qualitative examples."""
+    """Save per-class GT/prediction overlays for multilabel qualitative inspection.
+
+    Every selected source image occupies six rows, one per independent damage
+    channel. This prevents a priority-based composite rendering from hiding
+    overlapping labels.
+    """
     indices = select_qualitative_indices(targets, int(cfg.eval.n_qualitative_samples))
     if not indices:
         raise RuntimeError("No sample available for qualitative evaluation.")
 
     patch_cfg = cfg.data.p1ml_patch
-    fig, axes = plt.subplots(len(indices), 3, figsize=(13, 3.4 * len(indices)))
-    axes = np.atleast_2d(axes)
+    n_classes = len(UNIFIED_DAMAGE_CLASSES)
+    n_rows = len(indices) * n_classes
 
-    for row, index in enumerate(indices):
+    fig, axes = plt.subplots(
+        n_rows,
+        3,
+        figsize=(15, 3.4 * n_rows),
+        squeeze=False,
+    )
+
+    for sample_position, index in enumerate(indices):
         image, mask = load_rgb_and_multilabel_mask(samples[index])
+
         probability = predict_sliding_window_multilabel(
             model=model,
             image=image,
@@ -148,32 +181,95 @@ def save_qualitative_figure(model, samples, targets, cfg, device, threshold, out
             batch_size=int(patch_cfg.eval_batch_size),
             mean=IMAGENET_MEAN,
             std=IMAGENET_STD,
-            n_classes=len(UNIFIED_DAMAGE_CLASSES),
+            n_classes=n_classes,
             blend_mode=str(patch_cfg.blend_mode),
         ).numpy()
 
         prediction = (probability > threshold).astype(np.float32)
 
-        contents = [
-            (image, "image"),
-            (colorize(mask), "ground truth (per class)"),
-            (colorize(prediction), f"prediction @ {threshold:.2f}"),
-        ]
-        for column, (content, title) in enumerate(contents):
-            axes[row, column].imshow(content)
-            axes[row, column].set_axis_off()
+        for channel, class_name in enumerate(UNIFIED_DAMAGE_CLASSES):
+            row = sample_position * n_classes + channel
+            color = CLASS_COLORS[class_name]
+
+            gt_overlay = _overlay_single_channel(
+                image=image,
+                mask=mask[channel],
+                color=color,
+                alpha=0.50,
+            )
+            pred_overlay = _overlay_single_channel(
+                image=image,
+                mask=prediction[channel],
+                color=color,
+                alpha=0.50,
+            )
+
+            axes[row, 0].imshow(image)
+            axes[row, 1].imshow(gt_overlay)
+            axes[row, 2].imshow(pred_overlay)
+
+            for column in range(3):
+                axes[row, column].set_axis_off()
+
+            axes[row, 0].set_ylabel(
+                class_name,
+                rotation=0,
+                ha="right",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+            )
+
             if row == 0:
-                axes[row, column].set_title(title, fontsize=10)
+                axes[row, 0].set_title("RGB image", fontsize=11)
+                axes[row, 1].set_title("Ground truth", fontsize=11)
+                axes[row, 2].set_title(
+                    f"Prediction (threshold = {threshold:.2f})",
+                    fontsize=11,
+                )
+
+            if channel == 0:
+                axes[row, 0].text(
+                    0.01,
+                    0.98,
+                    f"Sample {sample_position + 1}",
+                    transform=axes[row, 0].transAxes,
+                    ha="left",
+                    va="top",
+                    color="white",
+                    fontsize=10,
+                    fontweight="bold",
+                    bbox={
+                        "facecolor": "black",
+                        "alpha": 0.65,
+                        "edgecolor": "none",
+                        "pad": 3,
+                    },
+                )
 
     handles = [
-        mpatches.Patch(color=np.array(CLASS_COLORS[name]) / 255.0, label=name)
+        mpatches.Patch(
+            color=np.asarray(CLASS_COLORS[name], dtype=np.float32) / 255.0,
+            label=name,
+        )
         for name in UNIFIED_DAMAGE_CLASSES
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=6, frameon=False)
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
-    fig.savefig(out_path, dpi=160)
-    plt.close(fig)
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=len(UNIFIED_DAMAGE_CLASSES),
+        frameon=False,
+        fontsize=10,
+    )
 
+    fig.suptitle(
+        "DACL10K multilabel qualitative evaluation — class-wise overlays",
+        fontsize=14,
+        y=0.997,
+    )
+    fig.tight_layout(rect=(0.06, 0.035, 1.0, 0.99))
+    fig.savefig(out_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
 
 @torch.no_grad()
 def evaluate_sliding_multilabel(model, samples, cfg, device) -> tuple[pd.DataFrame, pd.DataFrame]:

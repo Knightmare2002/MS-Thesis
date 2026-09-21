@@ -5,16 +5,11 @@ Official layout
     <root>/images/<split>/*.jpg
     <root>/annotations/<split>/*.json
 
-Each JSON contains `imageName`, `imageWidth`, `imageHeight` and `shapes`, where
-every shape has a `label` (one of the 19 classes) and `points`, a list of [x, y]
-polygon vertices with the origin in the top-left corner.
+Each JSON contains `imageName`, `imageWidth`, `imageHeight` and `shapes`, where every shape has a `label` (one of the 19 classes) and `points`, a list of [x, y] polygon vertices with the origin in the top-left corner.
 
 Two products are exposed here:
-* `rasterize_binary`  -> single crack channel (Crack + ACrack), i.e. the label
-  space of CrackSeg9k. This is what makes the *cross-dataset* evaluation of the
-  week-3 U-Net possible without training anything on dacl10k.
-* `rasterize_multilabel` -> [C,H,W] stack of overlapping classes, ready for the
-  multi-label head of the dual-branch network (weeks 5+).
+* `rasterize_binary`  -> single crack channel (Crack + ACrack), i.e. the label space of CrackSeg9k. This is what makes the *cross-dataset* evaluation of the week-3 U-Net possible without training anything on dacl10k.
+* `rasterize_multilabel` -> [C,H,W] stack of overlapping classes, ready for the multi-label head of the dual-branch network (weeks 5+).
 """
 
 from __future__ import annotations
@@ -26,7 +21,13 @@ import cv2
 import numpy as np
 from torch.utils.data import Dataset
 
-from .class_mapping import CRACK_LIKE_DACL10K, DACL10K_CLASS_TO_IDX, DACL10K_CLASSES
+from .class_mapping import (
+    CRACK_LIKE_DACL10K,
+    DACL10K_CLASS_TO_IDX,
+    DACL10K_CLASSES,
+    UNIFIED_DAMAGE_CLASSES,
+    unified_damage_label_to_channel,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -624,3 +625,346 @@ class Dacl10kCrackDataset(Dataset):
 
         augmented = self.transform(image=image, mask=mask)
         return augmented["image"], augmented["mask"].unsqueeze(0).float()
+
+
+# --------------------------------------------------------------------------- #
+# P1ML: multilabel damage-only target (6 independent channels)
+# --------------------------------------------------------------------------- #
+def rasterize_unified_damage(
+    annotation: dict,
+    shape: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+    """Rasterise the 6 unified damage channels into a [6,H,W] uint8 stack.
+
+    Channels are independent and may overlap (a spalling area can be corroded), which is why the target is multilabel and not multiclass. Component labels (Bearing, EJoint, ...) are dropped by the mapping, never folded into a class.
+    """
+    label_to_channel = unified_damage_label_to_channel()
+    n_channels = len(UNIFIED_DAMAGE_CLASSES)
+
+    height, width = shape or (int(annotation["imageHeight"]), int(annotation["imageWidth"]))
+    masks = np.zeros((n_channels, height, width), dtype=np.uint8)
+
+    for shape_dict in annotation.get("shapes", []):
+        channel = label_to_channel.get(shape_dict.get("label"))
+        if channel is not None:
+            _fill(masks[channel], shape_dict.get("points", []))
+
+    return masks
+
+
+def unified_damage_mask_hwc(
+    annotation: dict,
+    shape: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+    """Return the multilabel target as float32 [H,W,6], the layout albumentations expects."""
+    masks = rasterize_unified_damage(annotation, shape=shape)
+    return np.ascontiguousarray(masks.transpose(1, 2, 0)).astype(np.float32)
+
+
+def _pad_to_minimum_size_multilabel(
+    image: np.ndarray,
+    mask: np.ndarray,
+    patch_size: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+    """Pad aligned image and [H,W,C] multilabel mask so a native crop is always valid.
+
+    `cv2.copyMakeBorder` is limited to at most 4 channels, so the mask is padded with `np.pad` (zeros = "no damage annotated", which is the correct padding semantics for every channel).
+    """
+    height, width = image.shape[:2]
+    pad_bottom = max(patch_size - height, 0)
+    pad_right = max(patch_size - width, 0)
+
+    if pad_bottom == 0 and pad_right == 0:
+        return image, mask
+
+    image = cv2.copyMakeBorder(
+        image,
+        top=0,
+        bottom=pad_bottom,
+        left=0,
+        right=pad_right,
+        borderType=cv2.BORDER_REFLECT_101,
+    )
+    mask = np.pad(
+        mask,
+        ((0, pad_bottom), (0, pad_right), (0, 0)),
+        mode="constant",
+        constant_values=0.0,
+    )
+    return image, mask
+
+
+def _union_positive_pixels(mask_hwc: np.ndarray) -> int:
+    """Number of pixels positive in at least one of the 6 damage channels."""
+    return int((mask_hwc.max(axis=2) > 0).sum())
+
+
+def multilabel_sample_targets(
+    samples: list[tuple[Path, Path]],
+    ) -> list[list[int]]:
+    """Return per-image presence flags for the 6 unified damage classes."""
+    label_to_channel = unified_damage_label_to_channel()
+    n_channels = len(UNIFIED_DAMAGE_CLASSES)
+    targets = []
+
+    for _, annotation_path in samples:
+        annotation = load_annotation(annotation_path)
+        present = [0] * n_channels
+
+        for shape_dict in annotation.get("shapes", []):
+            channel = label_to_channel.get(shape_dict.get("label"))
+            if channel is not None and len(shape_dict.get("points", [])) >= 3:
+                present[channel] = 1
+
+        targets.append(present)
+
+    return targets
+
+
+def summarize_multilabel_targets(targets: list[list[int]]) -> dict:
+    """Image-level composition of a split for the 6 unified damage classes."""
+    if not targets:
+        raise ValueError("Cannot summarize an empty DACL10K split.")
+
+    n_images = len(targets)
+    per_class = {
+        name: int(sum(row[channel] for row in targets))
+        for channel, name in enumerate(UNIFIED_DAMAGE_CLASSES)
+    }
+
+    n_any = int(sum(1 for row in targets if any(row)))
+
+    return {
+        "n_images": n_images,
+        "n_images_with_any_damage": n_any,
+        "n_images_without_any_damage": n_images - n_any,
+        "n_images_per_class": per_class,
+        "image_fraction_per_class": {
+            name: count / n_images for name, count in per_class.items()
+        },
+        "mean_classes_per_image": sum(sum(row) for row in targets) / n_images,
+    }
+
+
+class Dacl10kMultilabelPatchDataset(Dataset):
+    """Native-resolution multilabel patches with a guaranteed positive quota.
+
+    Identical sampling contract to `Dacl10kCrackPatchDataset`, with one
+    difference that matters for P1ML: a patch is *positive* when it contains at least `min_positive_pixels` pixels positive in the **union** of the 6 damage channels. A crack-only criterion would starve the five non-crack channels.
+
+    Hard-negative mining is deliberately not supported here: the P1-B3 pool was mined by a binary crack model and would bias the multilabel negatives.
+    """
+
+    def __init__(
+        self,
+        samples: list[tuple[Path, Path]],
+        transform,
+        patch_size: int,
+        positive_patch_fraction: float = 0.70,
+        min_positive_pixels: int = 256,
+        max_negative_pixels: int = 0,
+        max_crop_attempts: int = 100,
+        patches_per_image: int = 4,
+    ) -> None:
+        if patch_size <= 0:
+            raise ValueError("patch_size must be positive.")
+        if not 0.0 < positive_patch_fraction < 1.0:
+            raise ValueError("positive_patch_fraction must be strictly in (0, 1).")
+        if min_positive_pixels < 1:
+            raise ValueError("min_positive_pixels must be >= 1.")
+        if max_negative_pixels < 0:
+            raise ValueError("max_negative_pixels must be >= 0.")
+        if max_crop_attempts < 1:
+            raise ValueError("max_crop_attempts must be >= 1.")
+        if patches_per_image < 1:
+            raise ValueError("patches_per_image must be >= 1.")
+
+        self.samples = samples
+        self.transform = transform
+        self.patch_size = int(patch_size)
+        self.positive_patch_fraction = float(positive_patch_fraction)
+        self.min_positive_pixels = int(min_positive_pixels)
+        self.max_negative_pixels = int(max_negative_pixels)
+        self.max_crop_attempts = int(max_crop_attempts)
+        self.patches_per_image = int(patches_per_image)
+        self.n_channels = len(UNIFIED_DAMAGE_CLASSES)
+
+        self.positive_sample_indices = self._find_positive_sample_indices()
+        positive_set = set(self.positive_sample_indices)
+        self.negative_sample_indices = [
+            index for index in range(len(self.samples)) if index not in positive_set
+        ]
+
+        if not self.positive_sample_indices:
+            raise RuntimeError(
+                "No DACL10K image can produce a positive multilabel patch with at least "
+                f"{self.min_positive_pixels} damage pixels."
+            )
+
+        # Almost every DACL10K image carries some damage (Weathering alone covers a large share of the split), so a pool of fully damage-free images can be empty. Negatives are then cropped from annotated images, where empty regions are abundant.
+        self.negative_source_indices = self.negative_sample_indices or list(
+            range(len(self.samples))
+        )
+        if not self.negative_sample_indices:
+            print(
+                "[patch-dataset] no damage-free image in this split: negative patches "
+                "will be cropped from annotated images (union-empty regions)."
+            )
+
+        self.n_patches = len(self.samples) * self.patches_per_image
+        self.n_positive_patches = round(self.n_patches * self.positive_patch_fraction)
+        self.n_negative_patches = self.n_patches - self.n_positive_patches
+
+        print(
+            "[patch-dataset] multilabel composition | "
+            f"total={self.n_patches} | positive={self.n_positive_patches} | "
+            f"negative={self.n_negative_patches} | "
+            f"positive source images={len(self.positive_sample_indices)} | "
+            f"damage-free images={len(self.negative_sample_indices)}"
+        )
+
+    def _find_positive_sample_indices(self) -> list[int]:
+        """Images whose full-resolution union mask holds enough damage pixels.
+
+        Only the JSON annotations are decoded here, never the JPEGs. As in the binary dataset this is a necessary but not sufficient condition for a single crop, which `_positive_crop` handles statistically.
+        """
+        positive_indices = []
+
+        for index, (_, annotation_path) in enumerate(self.samples):
+            annotation = load_annotation(annotation_path)
+            masks = rasterize_unified_damage(annotation)
+
+            if int((masks.max(axis=0) > 0).sum()) >= self.min_positive_pixels:
+                positive_indices.append(index)
+
+        return positive_indices
+
+    def __len__(self) -> int:
+        return self.n_patches
+
+    def _load_sample(self, sample_index: int) -> tuple[np.ndarray, np.ndarray]:
+        image_path, annotation_path = self.samples[sample_index]
+
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"Unreadable image: {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        annotation = load_annotation(annotation_path)
+        mask = unified_damage_mask_hwc(annotation, shape=image.shape[:2])
+
+        return _pad_to_minimum_size_multilabel(image, mask, self.patch_size)
+
+    def _random_crop(self, image: np.ndarray, mask: np.ndarray):
+        height, width = image.shape[:2]
+        top = np.random.randint(0, height - self.patch_size + 1)
+        left = np.random.randint(0, width - self.patch_size + 1)
+        return _crop_at(image, mask, top, left, self.patch_size)
+
+    def _positive_crop(self, image: np.ndarray, mask: np.ndarray):
+        """Return a damage-anchored crop, falling back to the richest one found."""
+        union = mask.max(axis=2)
+        damage_y, damage_x = np.where(union > 0)
+        if len(damage_y) == 0:
+            raise RuntimeError("Positive source image unexpectedly has an empty damage mask.")
+
+        height, width = image.shape[:2]
+        best_patch, best_pixels = None, -1
+
+        for _ in range(self.max_crop_attempts):
+            anchor_index = np.random.randint(len(damage_y))
+            center_y, center_x = int(damage_y[anchor_index]), int(damage_x[anchor_index])
+
+            top = np.random.randint(
+                max(0, center_y - self.patch_size + 1),
+                min(center_y, height - self.patch_size) + 1,
+            )
+            left = np.random.randint(
+                max(0, center_x - self.patch_size + 1),
+                min(center_x, width - self.patch_size) + 1,
+            )
+
+            image_patch, mask_patch = _crop_at(image, mask, top, left, self.patch_size)
+            n_positive = _union_positive_pixels(mask_patch)
+
+            if n_positive >= self.min_positive_pixels:
+                return image_patch, mask_patch
+            if n_positive > best_pixels:
+                best_patch, best_pixels = (image_patch, mask_patch), n_positive
+
+        return best_patch
+
+    def _negative_crop(self, image: np.ndarray, mask: np.ndarray):
+        """Return a crop with no damage pixels in any channel, whenever possible."""
+        best_patch, best_pixels = None, None
+
+        for _ in range(self.max_crop_attempts):
+            image_patch, mask_patch = self._random_crop(image, mask)
+            n_positive = _union_positive_pixels(mask_patch)
+
+            if n_positive <= self.max_negative_pixels:
+                return image_patch, mask_patch
+            if best_pixels is None or n_positive < best_pixels:
+                best_patch, best_pixels = (image_patch, mask_patch), n_positive
+
+        return best_patch
+
+    def __getitem__(self, index: int):
+        if index < self.n_positive_patches:
+            sample_index = int(np.random.choice(self.positive_sample_indices))
+            image, mask = self._load_sample(sample_index)
+            image_patch, mask_patch = self._positive_crop(image, mask)
+        else:
+            sample_index = int(np.random.choice(self.negative_source_indices))
+            image, mask = self._load_sample(sample_index)
+            image_patch, mask_patch = self._negative_crop(image, mask)
+
+        augmented = self.transform(image=image_patch, mask=mask_patch)
+        # transpose_mask=True in the multilabel transforms already yields [C,H,W].
+        return augmented["image"], augmented["mask"].float()
+
+
+class Dacl10kMultilabelCenterPatchDataset(Dataset):
+    """One deterministic damage-centred patch per image, for training-time monitoring."""
+
+    def __init__(
+        self,
+        samples: list[tuple[Path, Path]],
+        transform,
+        patch_size: int,
+    ) -> None:
+        self.samples = samples
+        self.transform = transform
+        self.patch_size = int(patch_size)
+        self.n_channels = len(UNIFIED_DAMAGE_CLASSES)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        image_path, annotation_path = self.samples[index]
+
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"Unreadable image: {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        annotation = load_annotation(annotation_path)
+        mask = unified_damage_mask_hwc(annotation, shape=image.shape[:2])
+        image, mask = _pad_to_minimum_size_multilabel(image, mask, self.patch_size)
+
+        height, width = image.shape[:2]
+        union = mask.max(axis=2)
+        damage_y, damage_x = np.where(union > 0)
+
+        if len(damage_y) > 0:
+            center_y, center_x = int(damage_y.mean()), int(damage_x.mean())
+        else:
+            center_y, center_x = height // 2, width // 2
+
+        top = int(np.clip(center_y - self.patch_size // 2, 0, height - self.patch_size))
+        left = int(np.clip(center_x - self.patch_size // 2, 0, width - self.patch_size))
+
+        image_patch, mask_patch = _crop_at(image, mask, top, left, self.patch_size)
+        augmented = self.transform(image=image_patch, mask=mask_patch)
+        return augmented["image"], augmented["mask"].float()

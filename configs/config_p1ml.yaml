@@ -22,9 +22,7 @@ data:
     # Kept for the binary rasterization utilities; unused by P1ML.
     crack_labels: ["Crack", "ACrack"]
 
-  # Patch sampling: identical geometry to the best binary pipeline (P1-B4), so
-  # the two families remain comparable. The only semantic change is that a patch
-  # is positive when the UNION of the 6 damage channels has enough pixels.
+  # Patch sampling: identical geometry to the best binary pipeline (P1-B4), so the two families remain comparable. The only semantic change is that a patch is positive when the UNION of the 6 damage channels has enough pixels.
   p1ml_patch:
     task_name: "dacl10k_multilabel_damage_patch"
     patch_size: 512
@@ -41,16 +39,14 @@ data:
     sanity_check_samples: 512
 
     # pos_weight vector: estimated on the official train split ONLY.
-    # Cache it once and reuse it in every P1ML run: runs A and B must optimize
-    # the exact same objective.
+    # Cache it once and reuse it in every P1ML run: runs A and B must optimize the exact same objective.
     class_weights:
       cache_path: "outputs/stats/dacl10k_multilabel_class_weights.json"
       max_images: null        # null = full train split; set e.g. 2000 to subsample
       clip_min: 1.0
       clip_max: 20.0
 
-  # Hard negative mining stays OFF in the first P1ML pipeline: the P1-B3 pool was
-  # mined by a binary crack model and would bias the multilabel negatives.
+  # Hard negative mining stays OFF in the first P1ML pipeline: the P1-B3 pool was mined by a binary crack model and would bias the multilabel negatives.
   hard_negative_mining:
     enabled: false
 
@@ -88,8 +84,7 @@ train:
     t_0: 10
     t_mult: 1
     eta_min: 0.000005
-  # Checkpoint selection and early stopping: macro Dice over the classes present
-  # in the monitor split. Not pixel accuracy (trivially high), not crack-only.
+  # Checkpoint selection and early stopping: macro Dice over the classes present in the monitor split. Not pixel accuracy (trivially high), not crack-only.
   selection_metric: "macro_dice_present"
 
 transfer:
@@ -98,8 +93,7 @@ transfer:
   source_name: "P1-B4 DACL10K binary crack U-Net++/ResNet-34 best checkpoint"
   source_dataset: "DACL10K_crack_binary"
   target_dataset: "DACL10K_multilabel_damage"
-  # Encoder + decoder are transferred; the 1-channel head is replaced by a
-  # 6-channel head initialised from scratch.
+  # Encoder + decoder are transferred; the 1-channel head is replaced by a 6-channel head initialised from scratch.
   load_mode: "partial_encoder_decoder"
   reset_optimizer: true
 

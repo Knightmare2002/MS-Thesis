@@ -238,8 +238,25 @@ def initialize_model_from_checkpoint(
 # --------------------------------------------------------------------------- #
 # Full training run
 # --------------------------------------------------------------------------- #
-def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Path) -> dict:
-    """Train with SGDR + early stopping. Returns the best validation metrics."""
+def fit(
+    model,
+    train_loader,
+    val_loader,
+    criterion,
+    cfg,
+    device,
+    output_dir: Path,
+    evaluate_fn=None,
+    selection_metric: str = "dice",
+    extra_history_keys: tuple[str, ...] = (),
+) -> dict:
+    """Train with SGDR + early stopping. Returns the best validation metrics.
+
+    `evaluate_fn`, `selection_metric` and `extra_history_keys` default to the
+    binary behaviour used by P0-P3. The multilabel pipeline (P1ML) passes
+    `evaluate_multilabel` and selects on `macro_dice_present`.
+    """
+    evaluate_fn = evaluate_fn or evaluate
     output_dir = ensure_dir(output_dir)
     last_path, best_path = output_dir / "last.pt", output_dir / "best.pt"
     history_path = output_dir / "history.csv"
@@ -304,7 +321,7 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
             model, train_loader, criterion, optimizer, scaler, device,
             accumulation_steps=cfg.train.accumulation_steps,
         )
-        val_metrics = evaluate(model, val_loader, criterion, device, threshold=cfg.eval.threshold)
+        val_metrics = evaluate_fn(model, val_loader, criterion, device, threshold=cfg.eval.threshold)
         scheduler.step()  # per-epoch stepping matches T_0 expressed in epochs
 
         row = {
@@ -316,8 +333,10 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
             "val_dice": val_metrics["dice"],
             "val_precision": val_metrics["precision"],
             "val_recall": val_metrics["recall"],
-            "seconds": round(time.time() - started, 1),
         }
+        for key in extra_history_keys:
+            row[f"val_{key}"] = val_metrics[key]
+        row["seconds"] = round(time.time() - started, 1)
         _append_csv(history_path, row)
         print(
             f"epoch {epoch:03d} | train {train_loss:.4f} | val {val_metrics['loss']:.4f} "
@@ -325,9 +344,19 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
             f"| P {val_metrics['precision']:.3f} R {val_metrics['recall']:.3f}"
         )
        
-        improved = val_metrics["dice"] > best_dice
+        if selection_metric not in val_metrics:
+            raise KeyError(
+                f"selection_metric '{selection_metric}' is not returned by the "
+                f"evaluation function. Available: {sorted(val_metrics)}"
+            )
+
+        improved = val_metrics[selection_metric] > best_dice
         if improved:
-            best_dice, best_metrics, epochs_without_improvement = val_metrics["dice"], val_metrics, 0
+            best_dice, best_metrics, epochs_without_improvement = (
+                val_metrics[selection_metric],
+                val_metrics,
+                0,
+            )
         else:
             epochs_without_improvement += 1
 
@@ -336,7 +365,7 @@ def fit(model, train_loader, val_loader, criterion, cfg, device, output_dir: Pat
         if improved:
             save_checkpoint(best_path, model, optimizer, scheduler, scaler, epoch, best_dice,
                             epochs_without_improvement)
-            print(f"  -> new best Dice {best_dice:.4f}, saved {best_path.name}")
+            print(f"  -> new best {selection_metric} {best_dice:.4f}, saved {best_path.name}")
         elif epochs_without_improvement >= cfg.train.early_stopping_patience:
             print(f"[fit] early stopping after {epochs_without_improvement} epochs without improvement")
             break
@@ -352,3 +381,141 @@ def _append_csv(path: Path, row: dict) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+# --------------------------------------------------------------------------- #
+# P1ML: task transfer with an incompatible segmentation head
+# --------------------------------------------------------------------------- #
+def initialize_model_from_checkpoint_partial(
+    model,
+    checkpoint_path: str | Path,
+    device: torch.device | str = "cpu",
+    allowed_missing_prefixes: tuple[str, ...] = ("segmentation_head.",),
+    required_prefixes: tuple[str, ...] = ("encoder.", "decoder."),
+) -> dict[str, Any]:
+    """Initialize encoder + decoder from a checkpoint whose head has a different shape.
+
+    Used for P1-B4 (binary, 1 output channel) -> P1ML (multilabel, 6 channels):
+    the shared representation is transferred, the head is re-initialised from
+    scratch. Contract, deliberately strict:
+
+    * only tensors under `allowed_missing_prefixes` may be skipped, and only when
+      their shape is incompatible; any other omission raises;
+    * every parameter under `required_prefixes` must be transferred, otherwise a
+      silent partial transfer would masquerade as a transfer experiment;
+    * no optimizer / scheduler / scaler / epoch / early-stopping state is read.
+
+    Returns a JSON-serialisable report (also written to the run dir by the
+    training script).
+    """
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"[transfer] source checkpoint not found: {checkpoint_path.resolve()}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, dict) or "model" not in checkpoint:
+        raise KeyError("[transfer] checkpoint must be a dict containing key 'model'.")
+
+    source_state_dict = checkpoint["model"]
+    target_state_dict = model.state_dict()
+    factory_sha256 = state_dict_sha256(target_state_dict)
+
+    transferred, skipped_shape_mismatch, skipped_absent_in_target = [], [], []
+
+    filtered: dict[str, torch.Tensor] = {}
+    for key, tensor in source_state_dict.items():
+        if key not in target_state_dict:
+            skipped_absent_in_target.append(key)
+            continue
+        if tuple(tensor.shape) != tuple(target_state_dict[key].shape):
+            skipped_shape_mismatch.append(
+                {
+                    "key": key,
+                    "source_shape": list(tensor.shape),
+                    "target_shape": list(target_state_dict[key].shape),
+                }
+            )
+            continue
+        filtered[key] = tensor
+        transferred.append(key)
+
+    def _is_allowed(key: str) -> bool:
+        return any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
+
+    unexpected_mismatch = [
+        entry["key"] for entry in skipped_shape_mismatch if not _is_allowed(entry["key"])
+    ]
+    if unexpected_mismatch:
+        raise RuntimeError(
+            "[transfer] shape mismatch outside the replaceable head: "
+            f"{unexpected_mismatch}"
+        )
+
+    unexpected_absent = [key for key in skipped_absent_in_target if not _is_allowed(key)]
+    if unexpected_absent:
+        raise RuntimeError(
+            f"[transfer] checkpoint keys absent from the target model: {unexpected_absent}"
+        )
+
+    incompatible = model.load_state_dict(filtered, strict=False)
+
+    not_initialized = [
+        key for key in incompatible.missing_keys if not _is_allowed(key)
+    ]
+    if not_initialized:
+        raise RuntimeError(
+            f"[transfer] parameters left at factory initialization: {not_initialized}"
+        )
+    if incompatible.unexpected_keys:
+        raise RuntimeError(
+            f"[transfer] unexpected keys after filtering: {incompatible.unexpected_keys}"
+        )
+
+    # Every encoder/decoder parameter must have been overwritten.
+    for prefix in required_prefixes:
+        required = [key for key in target_state_dict if key.startswith(prefix)]
+        missing = sorted(set(required) - set(transferred))
+        if not required:
+            raise RuntimeError(f"[transfer] target model has no parameter under '{prefix}'.")
+        if missing:
+            raise RuntimeError(
+                f"[transfer] incomplete transfer for '{prefix}': {len(missing)} tensors "
+                f"not loaded, e.g. {missing[:5]}"
+            )
+
+    initialized_sha256 = state_dict_sha256(model.state_dict())
+    if initialized_sha256 == factory_sha256:
+        raise RuntimeError(
+            "[transfer] model weights unchanged after the partial load: nothing was transferred."
+        )
+
+    report = {
+        "mode": "partial_encoder_decoder_head_reinit",
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_epoch": checkpoint.get("epoch"),
+        "checkpoint_best_metric": checkpoint.get("best_dice"),
+        "n_source_tensors": len(source_state_dict),
+        "n_target_tensors": len(target_state_dict),
+        "n_transferred_tensors": len(transferred),
+        "reinitialized_head_tensors": [entry["key"] for entry in skipped_shape_mismatch],
+        "head_shape_changes": skipped_shape_mismatch,
+        "skipped_absent_in_target": skipped_absent_in_target,
+        "allowed_missing_prefixes": list(allowed_missing_prefixes),
+        "required_prefixes": list(required_prefixes),
+        "factory_model_sha256": factory_sha256,
+        "initialized_model_sha256": initialized_sha256,
+        "restored_optimizer_state": False,
+        "restored_scheduler_state": False,
+        "restored_scaler_state": False,
+        "restored_epoch": False,
+        "restored_early_stopping_state": False,
+    }
+
+    print(
+        f"[transfer] partial load from {checkpoint_path.name}: "
+        f"{len(transferred)}/{len(target_state_dict)} tensors transferred | "
+        f"head re-initialised: {report['reinitialized_head_tensors']}"
+    )
+    print(f"[transfer] SHA-256={initialized_sha256}")
+
+    return report

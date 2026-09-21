@@ -121,3 +121,79 @@ def predict_sliding_window(
 
     probability_map = probability_sum / weight_sum.clamp_min(1e-8)
     return probability_map[0, 0, :original_height, :original_width].cpu()
+
+@torch.no_grad()
+def predict_sliding_window_multilabel(
+    model,
+    image: np.ndarray,
+    device: torch.device,
+    patch_size: int,
+    stride: int,
+    batch_size: int,
+    mean: tuple[float, float, float],
+    std: tuple[float, float, float],
+    n_classes: int,
+    blend_mode: str = "gaussian",
+) -> torch.Tensor:
+    """Return a full-resolution multilabel probability map [C,H,W].
+
+    Same geometry, padding and Gaussian fusion as `predict_sliding_window`: only
+    the accumulators carry C channels, and the sigmoid is applied per channel
+    (independent classes, never softmax across them).
+    """
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"Expected RGB image [H,W,3], got shape {image.shape}.")
+    if patch_size <= 0 or stride <= 0 or batch_size <= 0:
+        raise ValueError("patch_size, stride and batch_size must be positive.")
+    if n_classes <= 0:
+        raise ValueError("n_classes must be positive.")
+
+    original_height, original_width = image.shape[:2]
+    pad_bottom = max(patch_size - original_height, 0)
+    pad_right = max(patch_size - original_width, 0)
+
+    if pad_bottom or pad_right:
+        image = np.pad(image, ((0, pad_bottom), (0, pad_right), (0, 0)), mode="reflect")
+
+    height, width = image.shape[:2]
+    top_positions = _sliding_positions(height, patch_size, stride)
+    left_positions = _sliding_positions(width, patch_size, stride)
+
+    coordinates = [(top, left) for top in top_positions for left in left_positions]
+    blend = _blend_window(patch_size, blend_mode).to(device)
+
+    probability_sum = torch.zeros(
+        (1, n_classes, height, width), dtype=torch.float32, device=device
+    )
+    weight_sum = torch.zeros((1, 1, height, width), dtype=torch.float32, device=device)
+
+    model.eval()
+    for start in range(0, len(coordinates), batch_size):
+        batch_coordinates = coordinates[start : start + batch_size]
+        patches = [
+            _normalize_patch(
+                image[top : top + patch_size, left : left + patch_size],
+                mean=mean,
+                std=std,
+            )
+            for top, left in batch_coordinates
+        ]
+
+        batch = torch.stack(patches, dim=0).to(device, non_blocking=True)
+        logits = model(batch)
+
+        if logits.shape[1] != n_classes:
+            raise ValueError(
+                f"Model emits {logits.shape[1]} channels but n_classes={n_classes}."
+            )
+
+        probabilities = torch.sigmoid(logits.float())
+
+        for probability, (top, left) in zip(probabilities, batch_coordinates):
+            probability_sum[:, :, top : top + patch_size, left : left + patch_size] += (
+                probability.unsqueeze(0) * blend
+            )
+            weight_sum[:, :, top : top + patch_size, left : left + patch_size] += blend
+
+    probability_map = probability_sum / weight_sum.clamp_min(1e-8)
+    return probability_map[0, :, :original_height, :original_width].cpu()

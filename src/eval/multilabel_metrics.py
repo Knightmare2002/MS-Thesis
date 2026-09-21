@@ -1,26 +1,18 @@
 """Metrics for the P1ML multilabel damage task (6 independent channels).
 
-The binary `SegmentationMetrics` is intentionally left untouched: P0-P3 keep
-their exact numbers. Here every quantity is accumulated **per channel**, because
-the six unified damage classes differ by more than two orders of magnitude in
-pixel frequency and any channel-collapsed statistic would be a proxy for
-`surface` alone.
+The binary `SegmentationMetrics` is intentionally left untouched: P0-P3 keep their exact numbers. Here every quantity is accumulated **per channel**, because the six unified damage classes differ by more than two orders of magnitude in pixel frequency and any channel-collapsed statistic would be a proxy for `surface` alone.
 
 Reported quantities
 -------------------
-* per class: IoU, Dice, precision, recall (dataset-level, i.e. micro over the
-  pixels of that channel), plus its pixel support and how many images contain it;
-* `macro_dice_present` / `macro_iou_present`: unweighted mean over the classes
-  that actually occur in the evaluated split (support > 0). Classes absent from
-  the split are skipped rather than scored 0, which would confound "not present"
-  with "not detected". This is the model-selection and early-stopping metric;
-* `micro_dice` / `micro_iou` / `micro_precision` / `micro_recall`: counts pooled
-  over all channels, dominated by frequent classes, reported for comparability;
-* `false_alarm_rate_empty_gt`: share of (image, channel) pairs with empty ground
-  truth where the model still predicts that damage.
+* per class: IoU, Dice, precision, recall (dataset-level, i.e. micro over the pixels of that channel), plus its pixel support and how many images contain it;
 
-Aliases `dice`, `iou`, `precision`, `recall` map to the micro values so the
-existing `fit` history writer and console logging keep working unchanged.
+* `macro_dice_present` / `macro_iou_present`: unweighted mean over the classes that actually occur in the evaluated split (support > 0). Classes absent from the split are skipped rather than scored 0, which would confound "not present" with "not detected". This is the model-selection and early-stopping metric;
+
+* `micro_dice` / `micro_iou` / `micro_precision` / `micro_recall`: counts pooled over all channels, dominated by frequent classes, reported for comparability;
+
+* `false_alarm_rate_empty_gt`: share of (image, channel) pairs with empty ground truth where the model still predicts that damage.
+
+Aliases `dice`, `iou`, `precision`, `recall` map to the micro values so the existing `fit` history writer and console logging keep working unchanged.
 """
 
 from __future__ import annotations
@@ -194,9 +186,7 @@ def sweep_threshold_multilabel(
     """Re-score stored *probabilities* at several thresholds (calibration).
 
     Unlike the binary `sweep_threshold`, the input is already sigmoid-activated:
-    the sliding-window predictor returns blended probabilities, so logits are no
-    longer available. `logit(p)` is applied before delegating to the meter, which
-    keeps a single thresholding code path.
+    the sliding-window predictor returns blended probabilities, so logits are no longer available. `logit(p)` is applied before delegating to the meter, which keeps a single thresholding code path.
     """
     names = list(class_names or UNIFIED_DAMAGE_CLASSES)
     probability = probability.clamp(1e-6, 1.0 - 1e-6)
