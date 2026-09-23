@@ -93,29 +93,38 @@ def load_rgb_and_multilabel_mask(sample) -> tuple[np.ndarray, np.ndarray]:
     return image, mask
 
 
-def select_qualitative_indices(targets: list[list[int]], n_samples: int) -> list[int]:
-    """Deterministically pick images maximising damage-class diversity."""
-    ranked = sorted(range(len(targets)), key=lambda index: -sum(targets[index]))
-    chosen: list[int] = []
-    covered: set[int] = set()
+def select_qualitative_indices_per_class(
+    samples,
+    n_per_class: int = 2,
+) -> dict[str, list[int]]:
+    """Select up to n_per_class GT-positive images for each damage channel.
 
-    for index in ranked:
-        new = {channel for channel, flag in enumerate(targets[index]) if flag and channel not in covered}
-        if new or len(chosen) < 2:
-            chosen.append(index)
-            covered |= {channel for channel, flag in enumerate(targets[index]) if flag}
-        if len(chosen) >= n_samples:
-            break
+    Selection is deterministic and prioritises images containing the largest
+    annotated area of the corresponding class. This guarantees that each
+    per-class qualitative figure shows meaningful GT evidence rather than
+    arbitrary samples selected by global label diversity.
+    """
+    if n_per_class < 1:
+        raise ValueError("n_per_class must be >= 1.")
 
-    # Pad with damage-free images, useful to inspect false alarms.
-    empty = [index for index, row in enumerate(targets) if not any(row)]
-    for index in empty:
-        if len(chosen) >= n_samples:
-            break
-        chosen.append(index)
+    selected: dict[str, list[int]] = {}
 
-    return chosen[:n_samples]
+    for channel, class_name in enumerate(UNIFIED_DAMAGE_CLASSES):
+        candidates: list[tuple[float, int]] = []
 
+        for index, sample in enumerate(samples):
+            _, mask = load_rgb_and_multilabel_mask(sample)
+            n_positive_pixels = float(mask[channel].sum())
+
+            if n_positive_pixels > 0:
+                candidates.append((n_positive_pixels, index))
+
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        selected[class_name] = [
+            index for _, index in candidates[:n_per_class]
+        ]
+
+    return selected
 
 def _overlay_single_channel(
     image: np.ndarray,
@@ -146,31 +155,185 @@ def _overlay_single_channel(
 
     return overlay
 
-@torch.no_grad()
-def save_qualitative_figure(model, samples, targets, cfg, device, threshold, out_path) -> None:
-    """Save per-class GT/prediction overlays for multilabel qualitative inspection.
 
-    Every selected source image occupies six rows, one per independent damage
-    channel. This prevents a priority-based composite rendering from hiding
-    overlapping labels.
-    """
-    indices = select_qualitative_indices(targets, int(cfg.eval.n_qualitative_samples))
-    if not indices:
-        raise RuntimeError("No sample available for qualitative evaluation.")
+def _save_class_qualitative_figure(
+    model,
+    samples,
+    class_name: str,
+    sample_indices: list[int],
+    cfg,
+    device,
+    threshold: float,
+    out_path: Path,
+) -> None:
+    """Save one compact qualitative figure for one multilabel channel."""
+    if not sample_indices:
+        return
 
+    channel = list(UNIFIED_DAMAGE_CLASSES).index(class_name)
     patch_cfg = cfg.data.p1ml_patch
-    n_classes = len(UNIFIED_DAMAGE_CLASSES)
-    n_rows = len(indices) * n_classes
+    color = CLASS_COLORS[class_name]
 
     fig, axes = plt.subplots(
-        n_rows,
+        len(sample_indices),
         3,
-        figsize=(15, 3.4 * n_rows),
+        figsize=(14, 4.6 * len(sample_indices)),
         squeeze=False,
     )
 
-    for sample_position, index in enumerate(indices):
-        image, mask = load_rgb_and_multilabel_mask(samples[index])
+    for row, sample_index in enumerate(sample_indices):
+        image, mask = load_rgb_and_multilabel_mask(samples[sample_index])
+
+        probability = predict_sliding_window_multilabel(
+            model=model,
+            image=image,
+            device=device,
+            patch_size=int(patch_cfg.patch_size),
+            stride=int(patch_cfg.eval_stride),
+            batch_size=int(patch_cfg.eval_batch_size),
+            mean=IMAGENET_MEAN,
+            std=IMAGENET_STD,
+            n_classes=len(UNIFIED_DAMAGE_CLASSES),
+            blend_mode=str(patch_cfg.blend_mode),
+        ).numpy()
+
+        prediction = (probability[channel] > threshold).astype(np.float32)
+
+        gt_mask = mask[channel]
+        gt_overlay = _overlay_single_channel(
+            image=image,
+            mask=gt_mask,
+            color=color,
+            alpha=0.50,
+        )
+        pred_overlay = _overlay_single_channel(
+            image=image,
+            mask=prediction,
+            color=color,
+            alpha=0.50,
+        )
+
+        gt_pixels = int(gt_mask.sum())
+        pred_pixels = int(prediction.sum())
+
+        panels = [
+            (image, "RGB image"),
+            (gt_overlay, f"Ground truth — {class_name}"),
+            (pred_overlay, f"Prediction — {class_name}"),
+        ]
+
+        for column, (content, title) in enumerate(panels):
+            axes[row, column].imshow(content)
+            axes[row, column].set_axis_off()
+
+            if row == 0:
+                axes[row, column].set_title(title, fontsize=12)
+
+        axes[row, 0].text(
+            0.01,
+            0.98,
+            f"Sample {sample_index}\nGT pixels: {gt_pixels:,}\nPredicted pixels: {pred_pixels:,}",
+            transform=axes[row, 0].transAxes,
+            ha="left",
+            va="top",
+            color="white",
+            fontsize=10,
+            fontweight="bold",
+            bbox={
+                "facecolor": "black",
+                "alpha": 0.65,
+                "edgecolor": "none",
+                "pad": 3,
+            },
+        )
+
+    color_patch = mpatches.Patch(
+        color=np.asarray(color, dtype=np.float32) / 255.0,
+        label=class_name,
+    )
+    fig.legend(
+        handles=[color_patch],
+        loc="lower center",
+        frameon=False,
+        fontsize=11,
+    )
+
+    fig.suptitle(
+        f"DACL10K multilabel qualitative evaluation — {class_name}",
+        fontsize=15,
+        y=0.99,
+    )
+    fig.tight_layout(rect=(0.0, 0.04, 1.0, 0.96))
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+@torch.no_grad()
+def save_qualitative_figure(
+    model,
+    samples,
+    targets,
+    cfg,
+    device,
+    threshold,
+    out_path,
+) -> None:
+    """Save a compact overview plus one qualitative figure per damage class.
+
+    Outputs:
+    - qualitative_overview_multilabel.png:
+      6 rows x 3 columns, one representative image per class.
+    - qualitative_per_class/qualitative_<class>.png:
+      1-2 selected GT-positive examples for each individual class.
+
+    No priority-based channel compositing is used: each class is visualised
+    independently, preserving multilabel semantics.
+    """
+    del targets  # Selection is now based on native-resolution GT pixel support.
+
+    out_path = Path(out_path)
+    out_dir = out_path.parent
+    per_class_dir = ensure_dir(out_dir / "qualitative_per_class")
+
+    n_per_class = min(2, int(cfg.eval.n_qualitative_samples))
+    selected = select_qualitative_indices_per_class(
+        samples=samples,
+        n_per_class=n_per_class,
+    )
+
+    patch_cfg = cfg.data.p1ml_patch
+    n_classes = len(UNIFIED_DAMAGE_CLASSES)
+
+    # ------------------------------------------------------------------
+    # A. One compact overview: exactly one representative sample per class.
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(
+        n_classes,
+        3,
+        figsize=(15, 4.2 * n_classes),
+        squeeze=False,
+    )
+
+    for channel, class_name in enumerate(UNIFIED_DAMAGE_CLASSES):
+        candidates = selected[class_name]
+
+        if not candidates:
+            for column in range(3):
+                axes[channel, column].set_axis_off()
+
+            axes[channel, 0].text(
+                0.5,
+                0.5,
+                f"No validation image with GT-positive '{class_name}'",
+                ha="center",
+                va="center",
+                transform=axes[channel, 0].transAxes,
+                fontsize=11,
+            )
+            continue
+
+        sample_index = candidates[0]
+        image, mask = load_rgb_and_multilabel_mask(samples[sample_index])
 
         probability = predict_sliding_window_multilabel(
             model=model,
@@ -185,91 +348,94 @@ def save_qualitative_figure(model, samples, targets, cfg, device, threshold, out
             blend_mode=str(patch_cfg.blend_mode),
         ).numpy()
 
-        prediction = (probability > threshold).astype(np.float32)
+        gt_mask = mask[channel]
+        prediction = (probability[channel] > threshold).astype(np.float32)
+        color = CLASS_COLORS[class_name]
 
-        for channel, class_name in enumerate(UNIFIED_DAMAGE_CLASSES):
-            row = sample_position * n_classes + channel
-            color = CLASS_COLORS[class_name]
+        gt_overlay = _overlay_single_channel(
+            image=image,
+            mask=gt_mask,
+            color=color,
+            alpha=0.50,
+        )
+        pred_overlay = _overlay_single_channel(
+            image=image,
+            mask=prediction,
+            color=color,
+            alpha=0.50,
+        )
 
-            gt_overlay = _overlay_single_channel(
-                image=image,
-                mask=mask[channel],
-                color=color,
-                alpha=0.50,
-            )
-            pred_overlay = _overlay_single_channel(
-                image=image,
-                mask=prediction[channel],
-                color=color,
-                alpha=0.50,
-            )
+        panels = [
+            (image, "RGB image"),
+            (gt_overlay, "Ground truth"),
+            (pred_overlay, f"Prediction @ {threshold:.2f}"),
+        ]
 
-            axes[row, 0].imshow(image)
-            axes[row, 1].imshow(gt_overlay)
-            axes[row, 2].imshow(pred_overlay)
-
-            for column in range(3):
-                axes[row, column].set_axis_off()
-
-            axes[row, 0].set_ylabel(
-                class_name,
-                rotation=0,
-                ha="right",
-                va="center",
-                fontsize=10,
-                fontweight="bold",
-            )
-
-            if row == 0:
-                axes[row, 0].set_title("RGB image", fontsize=11)
-                axes[row, 1].set_title("Ground truth", fontsize=11)
-                axes[row, 2].set_title(
-                    f"Prediction (threshold = {threshold:.2f})",
-                    fontsize=11,
-                )
+        for column, (content, title) in enumerate(panels):
+            axes[channel, column].imshow(content)
+            axes[channel, column].set_axis_off()
 
             if channel == 0:
-                axes[row, 0].text(
-                    0.01,
-                    0.98,
-                    f"Sample {sample_position + 1}",
-                    transform=axes[row, 0].transAxes,
-                    ha="left",
-                    va="top",
-                    color="white",
-                    fontsize=10,
-                    fontweight="bold",
-                    bbox={
-                        "facecolor": "black",
-                        "alpha": 0.65,
-                        "edgecolor": "none",
-                        "pad": 3,
-                    },
-                )
+                axes[channel, column].set_title(title, fontsize=12)
 
-    handles = [
+        axes[channel, 0].set_ylabel(
+            f"{class_name}\n(sample {sample_index})",
+            rotation=0,
+            ha="right",
+            va="center",
+            fontsize=11,
+            fontweight="bold",
+            labelpad=18,
+        )
+
+    legend_handles = [
         mpatches.Patch(
             color=np.asarray(CLASS_COLORS[name], dtype=np.float32) / 255.0,
             label=name,
         )
         for name in UNIFIED_DAMAGE_CLASSES
     ]
+
     fig.legend(
-        handles=handles,
+        handles=legend_handles,
         loc="lower center",
         ncol=len(UNIFIED_DAMAGE_CLASSES),
         frameon=False,
         fontsize=10,
     )
-
     fig.suptitle(
-        "DACL10K multilabel qualitative evaluation — class-wise overlays",
-        fontsize=14,
-        y=0.997,
+        "DACL10K multilabel qualitative evaluation — compact class-wise overview",
+        fontsize=15,
+        y=0.995,
     )
-    fig.tight_layout(rect=(0.06, 0.035, 1.0, 0.99))
-    fig.savefig(out_path, dpi=160, bbox_inches="tight")
+    fig.tight_layout(rect=(0.05, 0.035, 1.0, 0.98))
+    fig.savefig(
+        out_dir / "qualitative_overview_multilabel.png",
+        dpi=200,
+        bbox_inches="tight",
+    )
     plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # B. Six readable class-specific figures, each with up to 2 examples.
+    # ------------------------------------------------------------------
+    for class_name in UNIFIED_DAMAGE_CLASSES:
+        _save_class_qualitative_figure(
+            model=model,
+            samples=samples,
+            class_name=class_name,
+            sample_indices=selected[class_name],
+            cfg=cfg,
+            device=device,
+            threshold=threshold,
+            out_path=per_class_dir / f"qualitative_{class_name}.png",
+        )
+
+    print(
+        "[qualitative] saved compact overview plus per-class figures to "
+        f"{out_dir.resolve()}"
+    )
+
 
 @torch.no_grad()
 def evaluate_sliding_multilabel(model, samples, cfg, device) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -433,7 +599,7 @@ def main() -> None:
         cfg=cfg,
         device=device,
         threshold=float(cfg.eval.threshold),
-        out_path=eval_dir / "qualitative_dacl10k_val_multilabel_sliding.png",
+        out_path=eval_dir / "qualitative_overview_multilabel.png",
     )
 
     print(
