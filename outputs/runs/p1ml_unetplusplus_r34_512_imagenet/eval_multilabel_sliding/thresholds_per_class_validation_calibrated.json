@@ -1,0 +1,107 @@
+{
+  "calibration_split_note": "Thresholds selected on the evaluation validation split. They are validation-calibrated operating thresholds, not blind-test results.",
+  "selection_metric": "dice",
+  "candidate_thresholds": [
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7
+  ],
+  "thresholds_per_class": {
+    "corrosion": 0.7,
+    "crack": 0.5,
+    "delamination": 0.7,
+    "moisture": 0.7,
+    "spalling": 0.7,
+    "surface": 0.7
+  },
+  "selected_rows": [
+    {
+      "class": "corrosion",
+      "threshold": 0.7,
+      "selected_metric": "dice",
+      "selected_value": 0.4882561534156929,
+      "dice": 0.4882561534156929,
+      "iou": 0.322975452831429,
+      "precision": 0.4423818887188368,
+      "recall": 0.544745337140489,
+      "support_pixels": 90796377.0,
+      "predicted_pixels": 111805895.0,
+      "false_alarm_rate_empty_gt": 0.8081632653061225
+    },
+    {
+      "class": "crack",
+      "threshold": 0.5,
+      "selected_metric": "dice",
+      "selected_value": 0.3138627347952421,
+      "dice": 0.3138627347952421,
+      "iou": 0.1861430509082117,
+      "precision": 0.2666242465119359,
+      "recall": 0.3814441550291855,
+      "support_pixels": 44594132.0,
+      "predicted_pixels": 63798290.0,
+      "false_alarm_rate_empty_gt": 0.8098693759071117
+    },
+    {
+      "class": "delamination",
+      "threshold": 0.7,
+      "selected_metric": "dice",
+      "selected_value": 0.5102185728325724,
+      "dice": 0.5102185728325724,
+      "iou": 0.3424788116755277,
+      "precision": 0.4790018357386055,
+      "recall": 0.5457877757756407,
+      "support_pixels": 68278737.0,
+      "predicted_pixels": 77798658.0,
+      "false_alarm_rate_empty_gt": 0.3341463414634146
+    },
+    {
+      "class": "moisture",
+      "threshold": 0.7,
+      "selected_metric": "dice",
+      "selected_value": 0.280082044887647,
+      "dice": 0.280082044887647,
+      "iou": 0.162846166036653,
+      "precision": 0.2014616609349932,
+      "recall": 0.4593390377181344,
+      "support_pixels": 115065870.0,
+      "predicted_pixels": 262353868.0,
+      "false_alarm_rate_empty_gt": 0.7570370370370371
+    },
+    {
+      "class": "spalling",
+      "threshold": 0.7,
+      "selected_metric": "dice",
+      "selected_value": 0.3844561527026339,
+      "dice": 0.3844561527026339,
+      "iou": 0.2379732084311969,
+      "precision": 0.2801847206613387,
+      "recall": 0.6123399806604887,
+      "support_pixels": 109847660.0,
+      "predicted_pixels": 240070600.0,
+      "false_alarm_rate_empty_gt": 0.8445945945945946
+    },
+    {
+      "class": "surface",
+      "threshold": 0.7,
+      "selected_metric": "dice",
+      "selected_value": 0.3781883991608369,
+      "dice": 0.3781883991608369,
+      "iou": 0.2331888605095397,
+      "precision": 0.2865583664141927,
+      "recall": 0.5559635575870615,
+      "support_pixels": 412197294.0,
+      "predicted_pixels": 799720758.0,
+      "false_alarm_rate_empty_gt": 0.9393258426966292
+    }
+  ],
+  "evaluation_metadata": {
+    "dataset": "dacl10k_validation_multilabel_sliding",
+    "patch_size": 512,
+    "stride": 256,
+    "blend_mode": "gaussian",
+    "checkpoint_name": "best.pt",
+    "checkpoint_epoch": 29
+  }
+}

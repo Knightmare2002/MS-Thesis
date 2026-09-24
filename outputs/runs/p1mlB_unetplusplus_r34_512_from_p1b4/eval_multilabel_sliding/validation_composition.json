@@ -1,0 +1,71 @@
+{
+  "split": "validation",
+  "class_names": [
+    "crack",
+    "spalling",
+    "corrosion",
+    "moisture",
+    "delamination",
+    "surface"
+  ],
+  "class_mapping_19_to_6": {
+    "crack": [
+      "Crack",
+      "ACrack"
+    ],
+    "spalling": [
+      "Rockpocket",
+      "Cavity",
+      "Spalling"
+    ],
+    "corrosion": [
+      "Rust",
+      "ExposedRebars",
+      "WConccor"
+    ],
+    "moisture": [
+      "Wetspot",
+      "Efflorescence"
+    ],
+    "delamination": [
+      "Hollowareas"
+    ],
+    "surface": [
+      "Graffiti",
+      "Weathering",
+      "Restformwork"
+    ]
+  },
+  "inference": {
+    "patch_size": 512,
+    "stride": 256,
+    "batch_size": 4,
+    "blend_mode": "gaussian"
+  },
+  "checkpoint": {
+    "path": "C:\\Users\\Samuele_Caruso\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1mlB_unetplusplus_r34_512_from_p1b4\\best.pt",
+    "name": "best.pt",
+    "epoch": 28,
+    "best_monitor_metric": 0.425457668174764
+  },
+  "n_images": 975,
+  "n_images_with_any_damage": 920,
+  "n_images_without_any_damage": 55,
+  "n_images_per_class": {
+    "crack": 286,
+    "spalling": 531,
+    "corrosion": 485,
+    "moisture": 300,
+    "delamination": 155,
+    "surface": 530
+  },
+  "image_fraction_per_class": {
+    "crack": 0.29333333333333333,
+    "spalling": 0.5446153846153846,
+    "corrosion": 0.49743589743589745,
+    "moisture": 0.3076923076923077,
+    "delamination": 0.15897435897435896,
+    "surface": 0.5435897435897435
+  },
+  "mean_classes_per_image": 2.345641025641026
+}

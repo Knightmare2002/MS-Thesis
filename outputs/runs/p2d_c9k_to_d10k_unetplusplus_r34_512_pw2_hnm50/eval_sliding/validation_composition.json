@@ -1,0 +1,24 @@
+{
+  "split": "validation",
+  "target_labels": [
+    "Crack",
+    "ACrack"
+  ],
+  "inference": {
+    "patch_size": 512,
+    "stride": 256,
+    "batch_size": 4,
+    "blend_mode": "gaussian"
+  },
+  "checkpoint": {
+    "path": "outputs/runs/p2d_c9k_to_d10k_unetplusplus_r34_512_pw2_hnm50/best.pt",
+    "name": "best.pt",
+    "epoch": 21,
+    "best_val_dice": 0.6170610887562272
+  },
+  "n_images": 975,
+  "n_positive": 286,
+  "n_negative": 689,
+  "positive_fraction": 0.29333333333333333,
+  "negative_fraction": 0.7066666666666667
+}

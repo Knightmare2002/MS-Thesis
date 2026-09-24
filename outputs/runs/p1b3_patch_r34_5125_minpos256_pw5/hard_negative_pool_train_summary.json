@@ -1,0 +1,17 @@
+{
+  "dataset": "dacl10k",
+  "split": "train",
+  "checkpoint": "outputs\\runs\\p1b3_patch_r34_5125_minpos256_pw5\\best.pt",
+  "checkpoint_epoch": 11,
+  "patch_size": 512,
+  "candidate_stride": 256,
+  "top_k_per_image": 3,
+  "probability_threshold": 0.5,
+  "min_predicted_fraction": 0.002,
+  "max_window_overlap": 0.25,
+  "negative_images_only": true,
+  "n_negative_images_considered": 4976,
+  "n_candidate_windows_evaluated": 275625,
+  "n_hard_negative_patches": 10879,
+  "seed": 42
+}

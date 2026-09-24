@@ -1,0 +1,88 @@
+project:
+  seed: 42
+  output_dir: outputs
+data:
+  dacl10k:
+    root: datasets/dacl10k
+    train_split: train
+    val_split: validation
+    crack_labels:
+    - Crack
+    - ACrack
+  p4a_patch:
+    task_name: dacl10k_multitask_crack_and_damage_patch
+    patch_size: 512
+    positive_patch_fraction: 0.6
+    min_positive_pixels: 256
+    max_negative_pixels: 0
+    max_crop_attempts: 100
+    patches_per_image: 4
+    eval_stride: 256
+    eval_batch_size: 4
+    blend_mode: gaussian
+    sanity_check_samples: 512
+    class_weights:
+      cache_path: outputs/stats/dacl10k_multilabel_class_weights.json
+      max_images: null
+      clip_min: 1.0
+      clip_max: 20.0
+  hard_negative_mining:
+    enabled: false
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+model:
+  arch: unetplusplus
+  encoder: resnet34
+  encoder_weights: imagenet
+  in_channels: 3
+  crack_classes: 1
+  multilabel_classes: 6
+  model_factory_encoder_weights: imagenet
+  effective_initialization: model_factory_encoder_weights=imagenet
+loss:
+  name: multitask_bce_dice
+  crack_weight: 1.0
+  multilabel_weight: 1.0
+  crack_channel: 0
+  crack:
+    bce_weight: 0.5
+    dice_weight: 0.5
+    pos_weight: 5.0
+  multilabel:
+    bce_weight: 0.5
+    dice_weight: 0.5
+train:
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true
+  early_stopping_patience: 10
+  resume: false
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  scheduler:
+    t_0: 10
+    t_mult: 1
+    eta_min: 5.0e-06
+  selection_metric: joint_score
+eval:
+  threshold: 0.5
+  threshold_sweep:
+  - 0.3
+  - 0.4
+  - 0.5
+  - 0.6
+  - 0.7
+  n_qualitative_samples: 6
+  calibration:
+    metric: dice
+    tie_break: highest_threshold
+run_provenance:
+  resumed_from_local_last_checkpoint: false
+  optimizer_state_initialization: fresh
+  scheduler_state_initialization: fresh
+  amp_scaler_state_initialization: fresh

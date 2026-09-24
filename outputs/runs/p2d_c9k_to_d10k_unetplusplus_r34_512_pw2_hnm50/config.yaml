@@ -1,0 +1,112 @@
+project:
+  seed: 42
+  output_dir: /home/sam/Thesis/MS-Thesis/outputs
+data:
+  crackseg9k:
+    images_dir: /home/sam/Thesis/MS-Thesis/datasets/crackseg9k/images
+    masks_dir: /home/sam/Thesis/MS-Thesis/datasets/crackseg9k/masks
+    mask_threshold: 0
+    val_fraction: 0.15
+    test_fraction: 0.15
+  dacl10k:
+    root: /home/sam/Thesis/MS-Thesis/datasets/dacl10k
+    train_split: train
+    val_split: validation
+    crack_labels:
+    - Crack
+    - ACrack
+  p1:
+    task_name: dacl10k_crack_binary
+    train_positive_fraction: 0.5
+    use_weighted_sampler: true
+    save_qualitative_split: val
+  p1_patch:
+    task_name: dacl10k_crack_patch_glb_positive_quota
+    patch_size: 512
+    positive_patch_fraction: 0.6
+    min_positive_pixels: 256
+    max_negative_pixels: 0
+    max_crop_attempts: 100
+    patches_per_image: 4
+    eval_stride: 256
+    eval_batch_size: 4
+    blend_mode: gaussian
+    sanity_check_samples: 512
+  hard_negative_mining:
+    enabled: true
+    source_checkpoint: /home/sam/Thesis/MS-Thesis/outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/best.pt
+    pool_path: /home/sam/Thesis/MS-Thesis/outputs/runs/p1b3_patch_r34_5125_minpos256_pw5/hard_negative_pool_train_linux.json
+    candidate_stride: 256
+    top_k_per_image: 3
+    max_window_overlap: 0.25
+    probability_threshold: 0.5
+    min_predicted_fraction: 0.002
+    hard_negative_fraction: 0.5
+    negative_images_only: true
+    refresh_each_epoch: false
+    seed: 42
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+model:
+  arch: unetplusplus
+  encoder: resnet34
+  encoder_weights: imagenet
+  in_channels: 3
+  classes: 1
+  model_factory_encoder_weights: imagenet
+  effective_initialization: 'full_model_checkpoint: P0 Crackseg9k U-Net++ ResNet34
+    best validation checkpoint (CrackSeg9K_to_DACL10K)'
+  effective_checkpoint: /home/sam/Thesis/MS-Thesis/outputs/runs/p0_unetplusplus_r34_512_pw2/best.pt
+  effective_source_dataset: CrackSeg9K
+  effective_target_dataset: DACL10K
+  effective_load_mode: full_model
+  effective_strict_loading: true
+  effective_source_model_sha256: 302094a5fa2c7445673b79541c31fed06f5370f440272349a2ca61ae872ab782
+  effective_initialized_model_sha256: 302094a5fa2c7445673b79541c31fed06f5370f440272349a2ca61ae872ab782
+loss:
+  name: bce_dice
+  bce_weight: 0.5
+  dice_weight: 0.5
+  pos_weight: 2.0
+  focal_weight: 0.5
+  focal_alpha: 0.833
+  focal_gamma: 2.0
+train:
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2
+  lr: 0.0001
+  weight_decay: 0.0001
+  amp: true
+  early_stopping_patience: 10
+  resume: true
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  scheduler:
+    t_0: 10
+    t_mult: 1
+    eta_min: 1.0e-06
+transfer:
+  init_checkpoint: /home/sam/Thesis/MS-Thesis/outputs/runs/p0_unetplusplus_r34_512_pw2/best.pt
+  source_name: P0 Crackseg9k U-Net++ ResNet34 best validation checkpoint
+  source_dataset: CrackSeg9K
+  target_dataset: DACL10K
+  load_mode: full_model
+  strict: true
+  reset_optimizer: true
+eval:
+  threshold: 0.5
+  threshold_sweep:
+  - 0.3
+  - 0.4
+  - 0.5
+  - 0.6
+  - 0.7
+  n_qualitative_samples: 6
+run_provenance:
+  resumed_from_local_last_checkpoint: false
+  optimizer_state_initialization: fresh
+  scheduler_state_initialization: fresh
+  amp_scaler_state_initialization: fresh

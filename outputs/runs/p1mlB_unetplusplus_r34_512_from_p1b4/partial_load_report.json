@@ -1,0 +1,54 @@
+{
+  "mode": "partial_encoder_decoder_head_reinit",
+  "checkpoint_path": "C:\\Users\\Samuele_Caruso\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1b4_unetplusplus_r34_minpos256_pw5_hnm\\best.pt",
+  "checkpoint_epoch": 11,
+  "checkpoint_best_metric": 0.5709002530709334,
+  "n_source_tensors": 350,
+  "n_target_tensors": 350,
+  "n_transferred_tensors": 348,
+  "reinitialized_head_tensors": [
+    "segmentation_head.0.weight",
+    "segmentation_head.0.bias"
+  ],
+  "head_shape_changes": [
+    {
+      "key": "segmentation_head.0.weight",
+      "source_shape": [
+        1,
+        16,
+        3,
+        3
+      ],
+      "target_shape": [
+        6,
+        16,
+        3,
+        3
+      ]
+    },
+    {
+      "key": "segmentation_head.0.bias",
+      "source_shape": [
+        1
+      ],
+      "target_shape": [
+        6
+      ]
+    }
+  ],
+  "skipped_absent_in_target": [],
+  "allowed_missing_prefixes": [
+    "segmentation_head."
+  ],
+  "required_prefixes": [
+    "encoder.",
+    "decoder."
+  ],
+  "factory_model_sha256": "227c62763f6c42ee15350bafe086a7fb7def30804583b576c21a8f5b2e3f0e0b",
+  "initialized_model_sha256": "b5b1731a1ff820e105ed019349e94b02071f6f138c6b8d39abb25ef0c4b6ce23",
+  "restored_optimizer_state": false,
+  "restored_scheduler_state": false,
+  "restored_scaler_state": false,
+  "restored_epoch": false,
+  "restored_early_stopping_state": false
+}

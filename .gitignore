@@ -9,10 +9,17 @@ env/
 *.tar.gz
 
 # Checkpoint and Results
-outputs/
+outputs/*
+!outputs/runs/
+!outputs/runs/**/
+
 *.pt
 *.pth
 *.onnx
+
+*.png
+*.jpg
+*.jpeg
 
 # Cache Python
 __pycache__/
