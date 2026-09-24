@@ -17,6 +17,7 @@ Aliases `dice`, `iou`, `precision`, `recall` map to the micro values so the exis
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import torch
@@ -31,7 +32,7 @@ EPS = 1e-7
 class MultilabelSegmentationMetrics:
     """Streaming per-channel accumulator: `update` per batch, `compute` at the end."""
 
-    threshold: float = 0.5
+    threshold: float | Sequence[float] | dict[str, float] = 0.5
     class_names: list[str] = field(default_factory=lambda: list(UNIFIED_DAMAGE_CLASSES))
     tp: list[float] = field(default_factory=list)
     fp: list[float] = field(default_factory=list)
@@ -49,6 +50,31 @@ class MultilabelSegmentationMetrics:
             self.n_images_empty = [0] * n
             self.n_images_empty_with_prediction = [0] * n
 
+        # P4-A: `threshold` may be a single float (global threshold, the historical
+        # behaviour used by every P1ML CSV) or one value per channel (calibrated
+        # thresholds). The scalar path below is kept byte-identical on purpose.
+        self._threshold_is_scalar = isinstance(self.threshold, (int, float)) and not isinstance(
+            self.threshold, bool
+        )
+        self._threshold_vector = resolve_class_thresholds(self.threshold, self.class_names)
+        self._threshold_tensor: torch.Tensor | None = None
+
+    def resolved_thresholds(self) -> dict[str, float]:
+        """Threshold actually applied to each channel, scalar or calibrated."""
+        return dict(zip(self.class_names, self._threshold_vector))
+
+    def _threshold_as_tensor(self, reference: torch.Tensor) -> torch.Tensor:
+        """Cache the per-channel threshold as a [1,C,1,1] tensor for broadcasting."""
+        if (
+            self._threshold_tensor is None
+            or self._threshold_tensor.device != reference.device
+            or self._threshold_tensor.dtype != reference.dtype
+        ):
+            self._threshold_tensor = torch.tensor(
+                self._threshold_vector, dtype=reference.dtype, device=reference.device
+            ).view(1, -1, 1, 1)
+        return self._threshold_tensor
+
     @property
     def n_classes(self) -> int:
         return len(self.class_names)
@@ -65,7 +91,11 @@ class MultilabelSegmentationMetrics:
                 f"Expected {self.n_classes} channels, got {logits.shape[1]}."
             )
 
-        pred = (torch.sigmoid(logits.float()) > self.threshold).float()
+        probability = torch.sigmoid(logits.float())
+        if self._threshold_is_scalar:
+            pred = (probability > float(self.threshold)).float()
+        else:
+            pred = (probability > self._threshold_as_tensor(probability)).float()
         target = target.float()
 
         # Flatten the spatial dimensions only: shape [B,C,HW] -> counts [B,C].
@@ -198,3 +228,126 @@ def sweep_threshold_multilabel(
         meter.update(logits, target)
         results[threshold] = meter.compute()
     return results
+
+
+# --------------------------------------------------------------------------- #
+# P4-A: per-channel threshold calibration helpers
+# --------------------------------------------------------------------------- #
+def resolve_class_thresholds(
+    threshold: float | Sequence[float] | Mapping[str, float],
+    class_names: Sequence[str],
+) -> list[float]:
+    """Normalize a threshold specification into one float per channel.
+
+    Accepted forms:
+
+    * `float` -> the same global threshold on every channel (legacy behaviour);
+    * `Sequence[float]` of length C -> already in channel order;
+    * `Mapping[str, float]` -> keyed by unified class name; every class must be
+      present, because a silently defaulted channel would make a "calibrated"
+      table partly uncalibrated without any trace in the artifacts.
+    """
+    names = list(class_names)
+
+    if isinstance(threshold, Mapping):
+        missing = [name for name in names if name not in threshold]
+        if missing:
+            raise ValueError(f"Missing threshold for classes: {missing}.")
+        unknown = [key for key in threshold if key not in names]
+        if unknown:
+            raise ValueError(f"Unknown classes in the threshold mapping: {unknown}.")
+        values = [float(threshold[name]) for name in names]
+    elif isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+        values = [float(threshold)] * len(names)
+    elif isinstance(threshold, Sequence) and not isinstance(threshold, (str, bytes)):
+        values = [float(value) for value in threshold]
+        if len(values) != len(names):
+            raise ValueError(
+                f"Expected {len(names)} thresholds (one per channel), got {len(values)}."
+            )
+    else:
+        raise TypeError(f"Unsupported threshold specification of type {type(threshold)!r}.")
+
+    for name, value in zip(names, values):
+        if not 0.0 < value < 1.0:
+            raise ValueError(f"Threshold for '{name}' must lie in (0, 1), got {value}.")
+
+    return values
+
+
+def select_thresholds_per_class(
+    rows,
+    class_names: Sequence[str] | None = None,
+    metric: str = "dice",
+) -> dict[str, dict]:
+    """Pick, per class, the sweep threshold maximising `metric`.
+
+    `rows` is any iterable of mappings holding at least `class`, `threshold` and
+    `metric` (typically the rows of `metrics_*_per_class.csv`).
+
+    Tie-break: **the highest threshold wins**. Two thresholds with the same Dice
+    describe the same operating quality at different operating points; the
+    stricter one predicts fewer pixels, hence fewer false positives, which is the
+    conservative choice for an inspection pipeline and makes the selection
+    deterministic and reproducible instead of dependent on the row order.
+
+    Returns, per class: selected threshold, its score, all candidates, and the
+    number of tied candidates, so the JSON artifact documents the decision.
+    """
+    names = list(class_names or UNIFIED_DAMAGE_CLASSES)
+    candidates: dict[str, list[tuple[float, float]]] = {name: [] for name in names}
+
+    for row in rows:
+        name = str(row["class"])
+        if name not in candidates:
+            raise ValueError(f"Unexpected class '{name}' in the sweep rows.")
+        candidates[name].append((float(row["threshold"]), float(row[metric])))
+
+    selection: dict[str, dict] = {}
+    for name in names:
+        values = sorted(candidates[name])
+        if not values:
+            raise ValueError(f"No sweep row available for class '{name}'.")
+
+        best_score = max(score for _, score in values)
+        tied = [threshold for threshold, score in values if score == best_score]
+
+        selection[name] = {
+            "threshold": float(max(tied)),  # tie-break: highest threshold
+            f"{metric}_at_selected_threshold": best_score,
+            "metric": metric,
+            "candidate_thresholds": [threshold for threshold, _ in values],
+            f"candidate_{metric}": [score for _, score in values],
+            "n_tied_candidates": len(tied),
+            "tie_break_rule": "highest threshold among the tied maxima",
+        }
+
+    return selection
+
+
+@torch.no_grad()
+def score_multilabel_probabilities(
+    probability: torch.Tensor,
+    target: torch.Tensor,
+    threshold: float | Sequence[float] | Mapping[str, float],
+    class_names: Sequence[str] | None = None,
+    meter: "MultilabelSegmentationMetrics | None" = None,
+) -> "MultilabelSegmentationMetrics":
+    """Accumulate one full-resolution prediction into a (possibly mixed-threshold) meter.
+
+    The sliding-window predictor returns blended *probabilities*, so the inverse
+    sigmoid is applied before delegating to the meter: a single thresholding code
+    path is kept for global and calibrated thresholds alike, which is what makes
+    the calibrated CSVs comparable in kind with the standard ones.
+    """
+    names = list(class_names or UNIFIED_DAMAGE_CLASSES)
+    active = meter or MultilabelSegmentationMetrics(threshold=threshold, class_names=names)
+
+    logits = torch.logit(probability.clamp(1e-6, 1.0 - 1e-6))
+    if logits.ndim == 3:
+        logits = logits.unsqueeze(0)
+    if target.ndim == 3:
+        target = target.unsqueeze(0)
+
+    active.update(logits, target)
+    return active

@@ -295,3 +295,124 @@ def build_multilabel_loss(cfg, pos_weight: Sequence[float]) -> nn.Module:
         bce_weight=float(cfg.loss.bce_weight),
         dice_weight=float(cfg.loss.dice_weight),
     )
+
+
+# --------------------------------------------------------------------------- #
+# P4-A: multitask objective (shared encoder, two heads)
+# --------------------------------------------------------------------------- #
+class MultitaskSegmentationLoss(nn.Module):
+    """Joint objective `w_crack * L_crack + w_multilabel * L_multilabel`.
+
+    Design decisions, all dictated by the P4-A "controlled comparison" rule:
+
+    * the two terms are the *same* losses used by the single-task baselines, so
+      the only difference against P1-B4 / P1ML-A is the shared encoder:
+      `BceDiceLoss` (scalar pos_weight, as in P1-B4) for the crack head and
+      `MultilabelBceDiceLoss` (vector pos_weight, as in P1ML) for the 6 channels;
+    * the task weights are fixed to 1.0 / 1.0. Any tuning of them, uncertainty
+      weighting, GradNorm or attention belongs to P4-B and is deliberately out of
+      scope here;
+    * the crack target is **derived** from the multilabel target, channel
+      `crack_channel` (Crack + ACrack). The loader therefore yields a single
+      [B,6,H,W] mask and the two tasks are pixel-aligned by construction: no
+      duplicated rasterization, no second taxonomy, no risk of the two heads
+      seeing different crops of the same image;
+    * `forward` returns a scalar so the module stays usable by any generic
+      training loop; the two components are exposed in `last_components` for the
+      CSV history.
+    """
+
+    def __init__(
+        self,
+        crack_loss: nn.Module,
+        multilabel_loss: nn.Module,
+        crack_weight: float = 1.0,
+        multilabel_weight: float = 1.0,
+        crack_channel: int = 0,
+    ) -> None:
+        super().__init__()
+        if crack_weight <= 0 or multilabel_weight <= 0:
+            raise ValueError("Task weights must be positive (P4-A uses 1.0 / 1.0).")
+        if crack_channel < 0:
+            raise ValueError("crack_channel must be >= 0.")
+
+        self.crack_loss = crack_loss
+        self.multilabel_loss = multilabel_loss
+        self.crack_weight = float(crack_weight)
+        self.multilabel_weight = float(multilabel_weight)
+        self.crack_channel = int(crack_channel)
+        self.last_components: dict[str, float] = {}
+
+    def crack_target(self, targets: torch.Tensor) -> torch.Tensor:
+        """Slice the crack channel out of the multilabel target, keeping [B,1,H,W]."""
+        channel = self.crack_channel
+        if targets.ndim != 4 or targets.shape[1] <= channel:
+            raise ValueError(
+                f"Expected a [B,C,H,W] multilabel target with C > {channel}, "
+                f"got {tuple(targets.shape)}."
+            )
+        return targets[:, channel : channel + 1]
+
+    def forward(self, outputs, targets: torch.Tensor) -> torch.Tensor:
+        if not (isinstance(outputs, (tuple, list)) and len(outputs) == 2):
+            raise TypeError(
+                "MultitaskSegmentationLoss expects (crack_logits, multilabel_logits)."
+            )
+
+        crack_logits, multilabel_logits = outputs
+        crack = self.crack_loss(crack_logits, self.crack_target(targets))
+        multilabel = self.multilabel_loss(multilabel_logits, targets)
+        total = self.crack_weight * crack + self.multilabel_weight * multilabel
+
+        self.last_components = {
+            "crack": float(crack.detach().item()),
+            "multilabel": float(multilabel.detach().item()),
+            "total": float(total.detach().item()),
+        }
+        return total
+
+
+def build_multitask_loss(cfg, pos_weight: Sequence[float]) -> MultitaskSegmentationLoss:
+    """Factory for the P4-A joint loss.
+
+    `pos_weight` is the cached 6-entry vector estimated on the official DACL10K
+    train split (identical to P1ML, so runs stay comparable). The crack head uses
+    the scalar `loss.crack.pos_weight` of P1-B4 rather than `pos_weight[0]`: the
+    binary baseline it must be compared against was optimised with that value.
+    """
+    name = str(cfg.loss.name).lower()
+    if name != "multitask_bce_dice":
+        raise ValueError(
+            f"Unsupported P4-A loss '{cfg.loss.name}'. Expected 'multitask_bce_dice'."
+        )
+
+    crack_cfg = cfg.loss.crack
+    multilabel_cfg = cfg.loss.multilabel
+
+    crack_pos_weight = crack_cfg.get("pos_weight")
+    crack_loss = BceDiceLoss(
+        bce_weight=float(crack_cfg.get("bce_weight", 0.5)),
+        dice_weight=float(crack_cfg.get("dice_weight", 0.5)),
+        pos_weight=float(crack_pos_weight) if crack_pos_weight is not None else None,
+    )
+    multilabel_loss = MultilabelBceDiceLoss(
+        pos_weight=pos_weight,
+        bce_weight=float(multilabel_cfg.get("bce_weight", 0.5)),
+        dice_weight=float(multilabel_cfg.get("dice_weight", 0.5)),
+    )
+
+    crack_weight = float(cfg.loss.get("crack_weight", 1.0))
+    multilabel_weight = float(cfg.loss.get("multilabel_weight", 1.0))
+    print(
+        f"[loss] multitask_bce_dice | crack_weight={crack_weight} "
+        f"(pos_weight={crack_pos_weight}) | multilabel_weight={multilabel_weight} "
+        f"| multilabel pos_weight={[round(float(w), 3) for w in pos_weight]}"
+    )
+
+    return MultitaskSegmentationLoss(
+        crack_loss=crack_loss,
+        multilabel_loss=multilabel_loss,
+        crack_weight=crack_weight,
+        multilabel_weight=multilabel_weight,
+        crack_channel=int(cfg.loss.get("crack_channel", 0)),
+    )

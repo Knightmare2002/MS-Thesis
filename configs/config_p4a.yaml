@@ -1,0 +1,122 @@
+# =============================================================================
+# P4-A - Controlled multitask baseline on DACL10K.
+#
+#   shared ResNet-34 encoder
+#     |-- crack decoder + head       -> [B,1,H,W]   (Crack + ACrack)
+#     |-- multilabel decoder + head  -> [B,6,H,W]   (unified 19 -> 6 taxonomy)
+#
+# The single question P4-A answers is whether the shared encoder helps both tasks
+# simultaneously. Therefore every non-architectural hyper-parameter below is a
+# verbatim copy of configs/config_p1ml.yaml (which itself mirrors P1-B4):
+# split, patch geometry, transforms, AdamW, lr, weight decay, AMP, accumulation,
+# scheduler, warm-up, epochs, early stopping, threshold and sweep.
+# Any change here breaks the comparison against P1-B4 and P1ML-A.
+#
+# Out of scope (P4-B): task weighting/uncertainty weighting, attention, hard
+# negative mining, CrackSeg9K, extra augmentation.
+#
+#   python scripts/14_train_dacl10k_multitask.py --run-name p4a_unetpp_r34_shared_encoder
+#   python scripts/15_evaluate_dacl10k_multitask_sliding.py --run-dir outputs/runs/p4a_unetpp_r34_shared_encoder
+#   python scripts/17_calibrate_multilabel_thresholds.py   --run-dir outputs/runs/p4a_unetpp_r34_shared_encoder
+# =============================================================================
+
+project:
+  seed: 42
+  output_dir: "outputs"
+
+data:
+  dacl10k:
+    root: "datasets/dacl10k"
+    train_split: "train"
+    val_split: "validation"
+    # The crack task target is channel 0 of the multilabel mask, i.e. exactly
+    # these two labels: no second rasterization, no second taxonomy.
+    crack_labels: ["Crack", "ACrack"]
+
+  # Identical geometry to data.p1ml_patch in configs/config_p1ml.yaml.
+  p4a_patch:
+    task_name: "dacl10k_multitask_crack_and_damage_patch"
+    patch_size: 512
+    positive_patch_fraction: 0.60
+    min_positive_pixels: 256
+    max_negative_pixels: 0
+    max_crop_attempts: 100
+    patches_per_image: 4
+
+    eval_stride: 256
+    eval_batch_size: 4
+    blend_mode: "gaussian"
+
+    sanity_check_samples: 512
+
+    # Same cache file as P1ML on purpose: runs P1ML-A and P4-A must optimise the
+    # multilabel term with the identical pos_weight vector.
+    class_weights:
+      cache_path: "outputs/stats/dacl10k_multilabel_class_weights.json"
+      max_images: null
+      clip_min: 1.0
+      clip_max: 20.0
+
+  # Off in P4-A: HNM is a P4-B/P1-B3 variable, not an architectural one.
+  hard_negative_mining:
+    enabled: false
+
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+
+model:
+  arch: "unetplusplus"
+  encoder: "resnet34"
+  encoder_weights: "imagenet"
+  in_channels: 3
+  crack_classes: 1         # binary crack head
+  multilabel_classes: 6    # crack, spalling, corrosion, moisture, delamination, surface
+  # `classes` is intentionally absent: a P4 run has two output widths, and the
+  # single-head scripts (12, 08) must fail loudly rather than load this config.
+
+loss:
+  # L = crack_weight * BceDice(crack) + multilabel_weight * MultilabelBceDice(6ch)
+  # Weights fixed to 1.0 / 1.0: tuning them is P4-B.
+  name: "multitask_bce_dice"
+  crack_weight: 1.0
+  multilabel_weight: 1.0
+  crack_channel: 0
+  crack:
+    bce_weight: 0.5
+    dice_weight: 0.5
+    pos_weight: 5.0        # same scalar as the P1-B4 binary baseline
+  multilabel:
+    bce_weight: 0.5
+    dice_weight: 0.5       # vector pos_weight comes from the cached JSON
+
+train:
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true
+  early_stopping_patience: 10
+  resume: false
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  scheduler:
+    t_0: 10
+    t_mult: 1
+    eta_min: 0.000005
+  # joint_score = 0.5 * crack_dice + 0.5 * macro_dice_present.
+  # Prevents P4-A from "winning" by collapsing one of the two tasks.
+  # Alternatives allowed: "crack_dice", "macro_dice_present".
+  selection_metric: "joint_score"
+
+eval:
+  threshold: 0.5
+  threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7]
+  n_qualitative_samples: 6
+  # Per-channel calibration (scripts/17): additive artifacts only, the standard
+  # threshold-0.5 CSVs are never overwritten.
+  calibration:
+    metric: "dice"
+    tie_break: "highest_threshold"

@@ -420,9 +420,12 @@ def main() -> None:
             "metrics_dacl10k_val_multilabel_sliding.csv",
             "metrics_dacl10k_val_multilabel_per_class.csv",
             "validation_composition.json",
-            "qualitative_dacl10k_val_multilabel_sliding.png",
         ):
             assert (eval_dir / artifact).exists(), f"missing artifact: {artifact}"
+        
+        qualitative = sorted(eval_dir.glob("qualitative*.png"))
+        assert qualitative, "no qualitative figure produced by scripts/12"
+        print(f"[smoke] qualitative figures: {[p.name for p in qualitative]}")
 
         # Transfer run B: the same pipeline initialised from the P1ML best.pt
         # (shape-compatible) exercises the transfer branch of the script.

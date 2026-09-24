@@ -119,3 +119,25 @@ def ensure_dir(path: str | Path) -> Path:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def multilabel_patch_cfg(cfg) -> Any:
+    """Return the patch/eval geometry block of a multilabel-capable run.
+
+    P1ML stores it under `data.p1ml_patch`, 
+    
+    P4 under `data.p4a_patch`; 
+    
+    the two blocks hold the *same* geometry on purpose (512 patches, stride 256, Gaussian blend), and resolving the key here is what lets one evaluation/calibration script serve both families without duplicating the geometry in code.
+    """
+    for key in ("p4a_patch", "p1ml_patch"):
+        section = cfg.data.get(key)
+        if section is not None:
+            # `dict.get` bypasses Config.__getattr__: re-wrap so callers keep
+            # attribute access (patch_cfg.patch_size).
+            return Config(section) if isinstance(section, dict) else section
+
+    raise KeyError(
+        "No multilabel patch section found: expected 'data.p4a_patch' (P4) or "
+        "'data.p1ml_patch' (P1ML) in the run config."
+    )

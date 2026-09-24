@@ -1,0 +1,514 @@
+--- a/src/losses.py
++++ b/src/losses.py
+@@ -301,3 +301,124 @@
+         bce_weight=float(cfg.loss.bce_weight),
+         dice_weight=float(cfg.loss.dice_weight),
+     )
++
++
++# --------------------------------------------------------------------------- #
++# P4-A: multitask objective (shared encoder, two heads)
++# --------------------------------------------------------------------------- #
++class MultitaskSegmentationLoss(nn.Module):
++    """Joint objective `w_crack * L_crack + w_multilabel * L_multilabel`.
++
++    Design decisions, all dictated by the P4-A "controlled comparison" rule:
++
++    * the two terms are the *same* losses used by the single-task baselines, so
++      the only difference against P1-B4 / P1ML-A is the shared encoder:
++      `BceDiceLoss` (scalar pos_weight, as in P1-B4) for the crack head and
++      `MultilabelBceDiceLoss` (vector pos_weight, as in P1ML) for the 6 channels;
++    * the task weights are fixed to 1.0 / 1.0. Any tuning of them, uncertainty
++      weighting, GradNorm or attention belongs to P4-B and is deliberately out of
++      scope here;
++    * the crack target is **derived** from the multilabel target, channel
++      `crack_channel` (Crack + ACrack). The loader therefore yields a single
++      [B,6,H,W] mask and the two tasks are pixel-aligned by construction: no
++      duplicated rasterization, no second taxonomy, no risk of the two heads
++      seeing different crops of the same image;
++    * `forward` returns a scalar so the module stays usable by any generic
++      training loop; the two components are exposed in `last_components` for the
++      CSV history.
++    """
++
++    def __init__(
++        self,
++        crack_loss: nn.Module,
++        multilabel_loss: nn.Module,
++        crack_weight: float = 1.0,
++        multilabel_weight: float = 1.0,
++        crack_channel: int = 0,
++    ) -> None:
++        super().__init__()
++        if crack_weight <= 0 or multilabel_weight <= 0:
++            raise ValueError("Task weights must be positive (P4-A uses 1.0 / 1.0).")
++        if crack_channel < 0:
++            raise ValueError("crack_channel must be >= 0.")
++
++        self.crack_loss = crack_loss
++        self.multilabel_loss = multilabel_loss
++        self.crack_weight = float(crack_weight)
++        self.multilabel_weight = float(multilabel_weight)
++        self.crack_channel = int(crack_channel)
++        self.last_components: dict[str, float] = {}
++
++    def crack_target(self, targets: torch.Tensor) -> torch.Tensor:
++        """Slice the crack channel out of the multilabel target, keeping [B,1,H,W]."""
++        channel = self.crack_channel
++        if targets.ndim != 4 or targets.shape[1] <= channel:
++            raise ValueError(
++                f"Expected a [B,C,H,W] multilabel target with C > {channel}, "
++                f"got {tuple(targets.shape)}."
++            )
++        return targets[:, channel : channel + 1]
++
++    def forward(self, outputs, targets: torch.Tensor) -> torch.Tensor:
++        if not (isinstance(outputs, (tuple, list)) and len(outputs) == 2):
++            raise TypeError(
++                "MultitaskSegmentationLoss expects (crack_logits, multilabel_logits)."
++            )
++
++        crack_logits, multilabel_logits = outputs
++        crack = self.crack_loss(crack_logits, self.crack_target(targets))
++        multilabel = self.multilabel_loss(multilabel_logits, targets)
++        total = self.crack_weight * crack + self.multilabel_weight * multilabel
++
++        self.last_components = {
++            "crack": float(crack.detach().item()),
++            "multilabel": float(multilabel.detach().item()),
++            "total": float(total.detach().item()),
++        }
++        return total
++
++
++def build_multitask_loss(cfg, pos_weight: Sequence[float]) -> MultitaskSegmentationLoss:
++    """Factory for the P4-A joint loss.
++
++    `pos_weight` is the cached 6-entry vector estimated on the official DACL10K
++    train split (identical to P1ML, so runs stay comparable). The crack head uses
++    the scalar `loss.crack.pos_weight` of P1-B4 rather than `pos_weight[0]`: the
++    binary baseline it must be compared against was optimised with that value.
++    """
++    name = str(cfg.loss.name).lower()
++    if name != "multitask_bce_dice":
++        raise ValueError(
++            f"Unsupported P4-A loss '{cfg.loss.name}'. Expected 'multitask_bce_dice'."
++        )
++
++    crack_cfg = cfg.loss.crack
++    multilabel_cfg = cfg.loss.multilabel
++
++    crack_pos_weight = crack_cfg.get("pos_weight")
++    crack_loss = BceDiceLoss(
++        bce_weight=float(crack_cfg.get("bce_weight", 0.5)),
++        dice_weight=float(crack_cfg.get("dice_weight", 0.5)),
++        pos_weight=float(crack_pos_weight) if crack_pos_weight is not None else None,
++    )
++    multilabel_loss = MultilabelBceDiceLoss(
++        pos_weight=pos_weight,
++        bce_weight=float(multilabel_cfg.get("bce_weight", 0.5)),
++        dice_weight=float(multilabel_cfg.get("dice_weight", 0.5)),
++    )
++
++    crack_weight = float(cfg.loss.get("crack_weight", 1.0))
++    multilabel_weight = float(cfg.loss.get("multilabel_weight", 1.0))
++    print(
++        f"[loss] multitask_bce_dice | crack_weight={crack_weight} "
++        f"(pos_weight={crack_pos_weight}) | multilabel_weight={multilabel_weight} "
++        f"| multilabel pos_weight={[round(float(w), 3) for w in pos_weight]}"
++    )
++
++    return MultitaskSegmentationLoss(
++        crack_loss=crack_loss,
++        multilabel_loss=multilabel_loss,
++        crack_weight=crack_weight,
++        multilabel_weight=multilabel_weight,
++        crack_channel=int(cfg.loss.get("crack_channel", 0)),
++    )
+--- a/src/eval/multilabel_metrics.py
++++ b/src/eval/multilabel_metrics.py
+@@ -25,6 +25,7 @@
+ 
+ from __future__ import annotations
+ 
++from collections.abc import Mapping, Sequence
+ from dataclasses import dataclass, field
+ 
+ import torch
+@@ -39,7 +40,7 @@
+ class MultilabelSegmentationMetrics:
+     """Streaming per-channel accumulator: `update` per batch, `compute` at the end."""
+ 
+-    threshold: float = 0.5
++    threshold: float | Sequence[float] | dict[str, float] = 0.5
+     class_names: list[str] = field(default_factory=lambda: list(UNIFIED_DAMAGE_CLASSES))
+     tp: list[float] = field(default_factory=list)
+     fp: list[float] = field(default_factory=list)
+@@ -57,6 +58,31 @@
+             self.n_images_empty = [0] * n
+             self.n_images_empty_with_prediction = [0] * n
+ 
++        # P4-A: `threshold` may be a single float (global threshold, the historical
++        # behaviour used by every P1ML CSV) or one value per channel (calibrated
++        # thresholds). The scalar path below is kept byte-identical on purpose.
++        self._threshold_is_scalar = isinstance(self.threshold, (int, float)) and not isinstance(
++            self.threshold, bool
++        )
++        self._threshold_vector = resolve_class_thresholds(self.threshold, self.class_names)
++        self._threshold_tensor: torch.Tensor | None = None
++
++    def resolved_thresholds(self) -> dict[str, float]:
++        """Threshold actually applied to each channel, scalar or calibrated."""
++        return dict(zip(self.class_names, self._threshold_vector))
++
++    def _threshold_as_tensor(self, reference: torch.Tensor) -> torch.Tensor:
++        """Cache the per-channel threshold as a [1,C,1,1] tensor for broadcasting."""
++        if (
++            self._threshold_tensor is None
++            or self._threshold_tensor.device != reference.device
++            or self._threshold_tensor.dtype != reference.dtype
++        ):
++            self._threshold_tensor = torch.tensor(
++                self._threshold_vector, dtype=reference.dtype, device=reference.device
++            ).view(1, -1, 1, 1)
++        return self._threshold_tensor
++
+     @property
+     def n_classes(self) -> int:
+         return len(self.class_names)
+@@ -73,7 +99,11 @@
+                 f"Expected {self.n_classes} channels, got {logits.shape[1]}."
+             )
+ 
+-        pred = (torch.sigmoid(logits.float()) > self.threshold).float()
++        probability = torch.sigmoid(logits.float())
++        if self._threshold_is_scalar:
++            pred = (probability > float(self.threshold)).float()
++        else:
++            pred = (probability > self._threshold_as_tensor(probability)).float()
+         target = target.float()
+ 
+         # Flatten the spatial dimensions only: shape [B,C,HW] -> counts [B,C].
+@@ -208,3 +238,126 @@
+         meter.update(logits, target)
+         results[threshold] = meter.compute()
+     return results
++
++
++# --------------------------------------------------------------------------- #
++# P4-A: per-channel threshold calibration helpers
++# --------------------------------------------------------------------------- #
++def resolve_class_thresholds(
++    threshold: float | Sequence[float] | Mapping[str, float],
++    class_names: Sequence[str],
++) -> list[float]:
++    """Normalize a threshold specification into one float per channel.
++
++    Accepted forms:
++
++    * `float` -> the same global threshold on every channel (legacy behaviour);
++    * `Sequence[float]` of length C -> already in channel order;
++    * `Mapping[str, float]` -> keyed by unified class name; every class must be
++      present, because a silently defaulted channel would make a "calibrated"
++      table partly uncalibrated without any trace in the artifacts.
++    """
++    names = list(class_names)
++
++    if isinstance(threshold, Mapping):
++        missing = [name for name in names if name not in threshold]
++        if missing:
++            raise ValueError(f"Missing threshold for classes: {missing}.")
++        unknown = [key for key in threshold if key not in names]
++        if unknown:
++            raise ValueError(f"Unknown classes in the threshold mapping: {unknown}.")
++        values = [float(threshold[name]) for name in names]
++    elif isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
++        values = [float(threshold)] * len(names)
++    elif isinstance(threshold, Sequence) and not isinstance(threshold, (str, bytes)):
++        values = [float(value) for value in threshold]
++        if len(values) != len(names):
++            raise ValueError(
++                f"Expected {len(names)} thresholds (one per channel), got {len(values)}."
++            )
++    else:
++        raise TypeError(f"Unsupported threshold specification of type {type(threshold)!r}.")
++
++    for name, value in zip(names, values):
++        if not 0.0 < value < 1.0:
++            raise ValueError(f"Threshold for '{name}' must lie in (0, 1), got {value}.")
++
++    return values
++
++
++def select_thresholds_per_class(
++    rows,
++    class_names: Sequence[str] | None = None,
++    metric: str = "dice",
++) -> dict[str, dict]:
++    """Pick, per class, the sweep threshold maximising `metric`.
++
++    `rows` is any iterable of mappings holding at least `class`, `threshold` and
++    `metric` (typically the rows of `metrics_*_per_class.csv`).
++
++    Tie-break: **the highest threshold wins**. Two thresholds with the same Dice
++    describe the same operating quality at different operating points; the
++    stricter one predicts fewer pixels, hence fewer false positives, which is the
++    conservative choice for an inspection pipeline and makes the selection
++    deterministic and reproducible instead of dependent on the row order.
++
++    Returns, per class: selected threshold, its score, all candidates, and the
++    number of tied candidates, so the JSON artifact documents the decision.
++    """
++    names = list(class_names or UNIFIED_DAMAGE_CLASSES)
++    candidates: dict[str, list[tuple[float, float]]] = {name: [] for name in names}
++
++    for row in rows:
++        name = str(row["class"])
++        if name not in candidates:
++            raise ValueError(f"Unexpected class '{name}' in the sweep rows.")
++        candidates[name].append((float(row["threshold"]), float(row[metric])))
++
++    selection: dict[str, dict] = {}
++    for name in names:
++        values = sorted(candidates[name])
++        if not values:
++            raise ValueError(f"No sweep row available for class '{name}'.")
++
++        best_score = max(score for _, score in values)
++        tied = [threshold for threshold, score in values if score == best_score]
++
++        selection[name] = {
++            "threshold": float(max(tied)),  # tie-break: highest threshold
++            f"{metric}_at_selected_threshold": best_score,
++            "metric": metric,
++            "candidate_thresholds": [threshold for threshold, _ in values],
++            f"candidate_{metric}": [score for _, score in values],
++            "n_tied_candidates": len(tied),
++            "tie_break_rule": "highest threshold among the tied maxima",
++        }
++
++    return selection
++
++
++@torch.no_grad()
++def score_multilabel_probabilities(
++    probability: torch.Tensor,
++    target: torch.Tensor,
++    threshold: float | Sequence[float] | Mapping[str, float],
++    class_names: Sequence[str] | None = None,
++    meter: "MultilabelSegmentationMetrics | None" = None,
++) -> "MultilabelSegmentationMetrics":
++    """Accumulate one full-resolution prediction into a (possibly mixed-threshold) meter.
++
++    The sliding-window predictor returns blended *probabilities*, so the inverse
++    sigmoid is applied before delegating to the meter: a single thresholding code
++    path is kept for global and calibrated thresholds alike, which is what makes
++    the calibrated CSVs comparable in kind with the standard ones.
++    """
++    names = list(class_names or UNIFIED_DAMAGE_CLASSES)
++    active = meter or MultilabelSegmentationMetrics(threshold=threshold, class_names=names)
++
++    logits = torch.logit(probability.clamp(1e-6, 1.0 - 1e-6))
++    if logits.ndim == 3:
++        logits = logits.unsqueeze(0)
++    if target.ndim == 3:
++        target = target.unsqueeze(0)
++
++    active.update(logits, target)
++    return active
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -119,3 +119,24 @@
+     path = Path(path)
+     path.mkdir(parents=True, exist_ok=True)
+     return path
++
++
++def multilabel_patch_cfg(cfg) -> Any:
++    """Return the patch/eval geometry block of a multilabel-capable run.
++
++    P1ML stores it under `data.p1ml_patch`, P4 under `data.p4a_patch`; the two
++    blocks hold the *same* geometry on purpose (512 patches, stride 256, Gaussian
++    blend), and resolving the key here is what lets one evaluation/calibration
++    script serve both families without duplicating the geometry in code.
++    """
++    for key in ("p4a_patch", "p1ml_patch"):
++        section = cfg.data.get(key)
++        if section is not None:
++            # `dict.get` bypasses Config.__getattr__: re-wrap so callers keep
++            # attribute access (patch_cfg.patch_size).
++            return Config(section) if isinstance(section, dict) else section
++
++    raise KeyError(
++        "No multilabel patch section found: expected 'data.p4a_patch' (P4) or "
++        "'data.p1ml_patch' (P1ML) in the run config."
++    )
+--- a/src/data/stats.py
++++ b/src/data/stats.py
+@@ -7,6 +7,7 @@
+ 
+ from __future__ import annotations
+ 
++import json
+ from pathlib import Path
+ 
+ import numpy as np
+@@ -249,3 +250,65 @@
+             "n_images_present": stats["n_images_present"],
+         },
+     }
++
++
++def resolve_multilabel_class_weights(
++    cfg,
++    train_samples,
++    run_dir,
++    recompute: bool = False,
++    patch_cfg=None,
++) -> dict:
++    """Load (or estimate and cache) the 6-entry pos_weight vector.
++
++    Reusable version of the helper embedded in scripts/11: P4-A must optimise its
++    multilabel term with the *same* vector as P1ML-A, so both read the same cache
++    file (`data.<patch section>.class_weights.cache_path`). A copy is always
++    written next to the checkpoints, so each run directory stays self-contained.
++    """
++    from ..data.class_mapping import UNIFIED_DAMAGE_CLASSES
++    from ..provenance import to_jsonable
++    from ..utils import ensure_dir, multilabel_patch_cfg
++
++    section = patch_cfg if patch_cfg is not None else multilabel_patch_cfg(cfg)
++    weights_cfg = section.class_weights
++    cache_path = Path(str(weights_cfg["cache_path"]))
++    max_images = weights_cfg.get("max_images")
++
++    if cache_path.is_file() and not recompute:
++        with open(cache_path, encoding="utf-8") as fh:
++            payload = json.load(fh)
++        print(f"[class-weights] reusing cached vector from {cache_path}")
++    else:
++        print("[class-weights] estimating per-channel pixel frequency on the train split...")
++        stats = dacl10k_multilabel_pixel_stats(
++            train_samples,
++            max_images=int(max_images) if max_images else None,
++            seed=int(cfg.project.seed),
++        )
++        payload = multilabel_pos_weights(
++            stats,
++            clip_min=float(weights_cfg["clip_min"]),
++            clip_max=float(weights_cfg["clip_max"]),
++        )
++        payload["pixel_statistics"] = stats
++        ensure_dir(cache_path.parent)
++        with open(cache_path, "w", encoding="utf-8") as fh:
++            json.dump(to_jsonable(payload), fh, indent=2, ensure_ascii=False)
++        print(f"[class-weights] cached to {cache_path}")
++
++    if list(payload["class_names"]) != list(UNIFIED_DAMAGE_CLASSES):
++        raise RuntimeError(
++            "[class-weights] cached channel order does not match "
++            f"UNIFIED_DAMAGE_CLASSES: {payload['class_names']}"
++        )
++
++    with open(Path(run_dir) / "class_weights.json", "w", encoding="utf-8") as fh:
++        json.dump(to_jsonable(payload), fh, indent=2, ensure_ascii=False)
++
++    for name, raw, clipped in zip(
++        payload["class_names"], payload["pos_weight_raw"], payload["pos_weight"]
++    ):
++        print(f"[class-weights] {name:>13}: pos_weight {clipped:7.3f} (raw {raw:10.1f})")
++
++    return payload
+--- a/src/eval/sliding_window.py
++++ b/src/eval/sliding_window.py
+@@ -197,3 +197,90 @@
+ 
+     probability_map = probability_sum / weight_sum.clamp_min(1e-8)
+     return probability_map[0, :, :original_height, :original_width].cpu()
++
++
++@torch.no_grad()
++def predict_sliding_window_multitask(
++    model,
++    image: np.ndarray,
++    device: torch.device,
++    patch_size: int,
++    stride: int,
++    batch_size: int,
++    mean: tuple[float, float, float],
++    std: tuple[float, float, float],
++    n_classes: int,
++    blend_mode: str = "gaussian",
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """P4-A: full-resolution maps of both heads with a single encoder pass per patch.
++
++    Returns `(crack_probability [H,W], multilabel_probability [C,H,W])`.
++
++    Geometry, padding, Gaussian weights and normalization are byte-identical to
++    `predict_sliding_window` / `predict_sliding_window_multilabel`; the only
++    difference is that the shared encoder is evaluated once per patch and the two
++    decoders consume the same features, which is what makes the joint evaluation
++    cost one forward pass instead of two. Running the two single-head functions
++    separately on a multitask model (via `SingleHeadAdapter`) yields the same
++    numbers, only slower.
++    """
++    if image.ndim != 3 or image.shape[2] != 3:
++        raise ValueError(f"Expected RGB image [H,W,3], got shape {image.shape}.")
++    if patch_size <= 0 or stride <= 0 or batch_size <= 0:
++        raise ValueError("patch_size, stride and batch_size must be positive.")
++    if n_classes <= 0:
++        raise ValueError("n_classes must be positive.")
++
++    original_height, original_width = image.shape[:2]
++    pad_bottom = max(patch_size - original_height, 0)
++    pad_right = max(patch_size - original_width, 0)
++
++    if pad_bottom or pad_right:
++        image = np.pad(image, ((0, pad_bottom), (0, pad_right), (0, 0)), mode="reflect")
++
++    height, width = image.shape[:2]
++    coordinates = [
++        (top, left)
++        for top in _sliding_positions(height, patch_size, stride)
++        for left in _sliding_positions(width, patch_size, stride)
++    ]
++    blend = _blend_window(patch_size, blend_mode).to(device)
++
++    crack_sum = torch.zeros((1, 1, height, width), dtype=torch.float32, device=device)
++    multilabel_sum = torch.zeros((1, n_classes, height, width), dtype=torch.float32, device=device)
++    weight_sum = torch.zeros((1, 1, height, width), dtype=torch.float32, device=device)
++
++    model.eval()
++    for start in range(0, len(coordinates), batch_size):
++        batch_coordinates = coordinates[start : start + batch_size]
++        patches = [
++            _normalize_patch(
++                image[top : top + patch_size, left : left + patch_size], mean=mean, std=std
++            )
++            for top, left in batch_coordinates
++        ]
++
++        batch = torch.stack(patches, dim=0).to(device, non_blocking=True)
++        crack_logits, multilabel_logits = model(batch)
++
++        if crack_logits.shape[1] != 1:
++            raise ValueError(f"The crack head emits {crack_logits.shape[1]} channels, expected 1.")
++        if multilabel_logits.shape[1] != n_classes:
++            raise ValueError(
++                f"The multilabel head emits {multilabel_logits.shape[1]} channels "
++                f"but n_classes={n_classes}."
++            )
++
++        crack_probabilities = torch.sigmoid(crack_logits.float())
++        multilabel_probabilities = torch.sigmoid(multilabel_logits.float())
++
++        for index, (top, left) in enumerate(batch_coordinates):
++            window = (slice(None), slice(None), slice(top, top + patch_size), slice(left, left + patch_size))
++            crack_sum[window] += crack_probabilities[index].unsqueeze(0) * blend
++            multilabel_sum[window] += multilabel_probabilities[index].unsqueeze(0) * blend
++            weight_sum[window] += blend
++
++    weights = weight_sum.clamp_min(1e-8)
++    crack_map = (crack_sum / weights)[0, 0, :original_height, :original_width].cpu()
++    multilabel_map = (multilabel_sum / weights)[0, :, :original_height, :original_width].cpu()
++    return crack_map, multilabel_map

@@ -6,6 +6,7 @@ Image headers are read without decoding pixels when possible (PIL lazy open), wh
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -244,3 +245,65 @@ def multilabel_pos_weights(
             "n_images_present": stats["n_images_present"],
         },
     }
+
+
+def resolve_multilabel_class_weights(
+    cfg,
+    train_samples,
+    run_dir,
+    recompute: bool = False,
+    patch_cfg=None,
+) -> dict:
+    """Load (or estimate and cache) the 6-entry pos_weight vector.
+
+    Reusable version of the helper embedded in scripts/11: P4-A must optimise its
+    multilabel term with the *same* vector as P1ML-A, so both read the same cache
+    file (`data.<patch section>.class_weights.cache_path`). A copy is always
+    written next to the checkpoints, so each run directory stays self-contained.
+    """
+    from ..data.class_mapping import UNIFIED_DAMAGE_CLASSES
+    from ..provenance import to_jsonable
+    from ..utils import ensure_dir, multilabel_patch_cfg
+
+    section = patch_cfg if patch_cfg is not None else multilabel_patch_cfg(cfg)
+    weights_cfg = section.class_weights
+    cache_path = Path(str(weights_cfg["cache_path"]))
+    max_images = weights_cfg.get("max_images")
+
+    if cache_path.is_file() and not recompute:
+        with open(cache_path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        print(f"[class-weights] reusing cached vector from {cache_path}")
+    else:
+        print("[class-weights] estimating per-channel pixel frequency on the train split...")
+        stats = dacl10k_multilabel_pixel_stats(
+            train_samples,
+            max_images=int(max_images) if max_images else None,
+            seed=int(cfg.project.seed),
+        )
+        payload = multilabel_pos_weights(
+            stats,
+            clip_min=float(weights_cfg["clip_min"]),
+            clip_max=float(weights_cfg["clip_max"]),
+        )
+        payload["pixel_statistics"] = stats
+        ensure_dir(cache_path.parent)
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            json.dump(to_jsonable(payload), fh, indent=2, ensure_ascii=False)
+        print(f"[class-weights] cached to {cache_path}")
+
+    if list(payload["class_names"]) != list(UNIFIED_DAMAGE_CLASSES):
+        raise RuntimeError(
+            "[class-weights] cached channel order does not match "
+            f"UNIFIED_DAMAGE_CLASSES: {payload['class_names']}"
+        )
+
+    with open(Path(run_dir) / "class_weights.json", "w", encoding="utf-8") as fh:
+        json.dump(to_jsonable(payload), fh, indent=2, ensure_ascii=False)
+
+    for name, raw, clipped in zip(
+        payload["class_names"], payload["pos_weight_raw"], payload["pos_weight"]
+    ):
+        print(f"[class-weights] {name:>13}: pos_weight {clipped:7.3f} (raw {raw:10.1f})")
+
+    return payload
