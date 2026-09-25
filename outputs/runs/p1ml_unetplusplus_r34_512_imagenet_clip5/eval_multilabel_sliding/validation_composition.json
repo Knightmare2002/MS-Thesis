@@ -45,8 +45,8 @@
   "checkpoint": {
     "path": "outputs/runs/p1ml_unetplusplus_r34_512_imagenet_clip5/best.pt",
     "name": "best.pt",
-    "epoch": 10,
-    "best_monitor_metric": 0.49070922534855677
+    "epoch": 29,
+    "best_monitor_metric": 0.49765750560470173
   },
   "n_images": 975,
   "n_images_with_any_damage": 920,

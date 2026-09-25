@@ -120,22 +120,22 @@
   "selection_metric": "macro_dice_present",
   "sampling_sanity_check": {
     "n_samples": 512,
-    "positive_patches": 306,
+    "positive_patches": 307,
     "negative_patches": 205,
-    "intermediate_patches": 1,
-    "positive_fraction_observed": 0.59765625,
+    "intermediate_patches": 0,
+    "positive_fraction_observed": 0.599609375,
     "negative_fraction_observed": 0.400390625,
-    "intermediate_fraction_observed": 0.001953125,
-    "mean_union_damage_pixels": 67533.19140625,
+    "intermediate_fraction_observed": 0.0,
+    "mean_union_damage_pixels": 68069.123046875,
     "min_union_damage_pixels": 0,
     "max_union_damage_pixels": 262144,
     "patch_fraction_per_class": {
-      "crack": 0.1171875,
+      "crack": 0.12109375,
       "spalling": 0.29296875,
-      "corrosion": 0.236328125,
+      "corrosion": 0.23828125,
       "moisture": 0.126953125,
       "delamination": 0.095703125,
-      "surface": 0.28125
+      "surface": 0.283203125
     }
   },
   "validation_note": "Training-time validation uses one deterministic damage-centred patch per image as an optimization monitor only. Full-image multilabel metrics are written by scripts/12_evaluate_dacl10k_multilabel_sliding.py."

@@ -2,12 +2,12 @@
   "pipeline": "per-channel threshold calibration (additive)",
   "run_dir": "/home/sam/Thesis/MS-Thesis/outputs/runs/p1ml_unetplusplus_r34_512_imagenet_clip5",
   "run_family": "P1ML_single_head",
-  "created_utc": "2026-09-25T15:42:25+00:00",
+  "created_utc": "2026-09-25T19:48:21+00:00",
   "checkpoint": {
     "path": "/home/sam/Thesis/MS-Thesis/outputs/runs/p1ml_unetplusplus_r34_512_imagenet_clip5/best.pt",
     "name": "best.pt",
-    "epoch": 10,
-    "best_monitor_metric": 0.49070922534855677,
+    "epoch": 29,
+    "best_monitor_metric": 0.49765750560470173,
     "selection_metric_of_the_run": "macro_dice_present"
   },
   "split": "validation",
@@ -31,17 +31,17 @@
     "blend_mode": "gaussian"
   },
   "thresholds": {
-    "threshold_crack": 0.5,
-    "threshold_spalling": 0.7,
+    "threshold_crack": 0.3,
+    "threshold_spalling": 0.6,
     "threshold_corrosion": 0.6,
     "threshold_moisture": 0.5,
-    "threshold_delamination": 0.5,
-    "threshold_surface": 0.6
+    "threshold_delamination": 0.4,
+    "threshold_surface": 0.7
   },
   "per_class_selection": {
     "crack": {
-      "threshold": 0.5,
-      "dice_at_selected_threshold": 0.3434702981849541,
+      "threshold": 0.3,
+      "dice_at_selected_threshold": 0.2520518087937495,
       "metric": "dice",
       "candidate_thresholds": [
         0.3,
@@ -53,20 +53,20 @@
         0.9
       ],
       "candidate_dice": [
-        0.2708780131765614,
-        0.3221233805919444,
-        0.3434702981849541,
-        0.3165265472186815,
-        0.2459782025116533,
-        0.1507997210398187,
-        0.0813485592107309
+        0.2520518087937495,
+        0.2288020545999242,
+        0.2055531693071356,
+        0.1805116722343872,
+        0.1516037206650646,
+        0.1157164375591787,
+        0.0673654360149964
       ],
       "n_tied_candidates": 1,
       "tie_break_rule": "highest threshold among the tied maxima"
     },
     "spalling": {
-      "threshold": 0.7,
-      "dice_at_selected_threshold": 0.404925561326593,
+      "threshold": 0.6,
+      "dice_at_selected_threshold": 0.442926296972198,
       "metric": "dice",
       "candidate_thresholds": [
         0.3,
@@ -78,20 +78,20 @@
         0.9
       ],
       "candidate_dice": [
-        0.2540492777954978,
-        0.3017423677871422,
-        0.3457907089127221,
-        0.3852263583306647,
-        0.404925561326593,
-        0.3766476464407173,
-        0.2308887979210405
+        0.362269805897949,
+        0.4067201493199278,
+        0.4329223694158687,
+        0.442926296972198,
+        0.4330715150348436,
+        0.3878754510435227,
+        0.2717299759759412
       ],
       "n_tied_candidates": 1,
       "tie_break_rule": "highest threshold among the tied maxima"
     },
     "corrosion": {
       "threshold": 0.6,
-      "dice_at_selected_threshold": 0.4806693473418126,
+      "dice_at_selected_threshold": 0.5031154162970863,
       "metric": "dice",
       "candidate_thresholds": [
         0.3,
@@ -103,20 +103,20 @@
         0.9
       ],
       "candidate_dice": [
-        0.3924904578135821,
-        0.4535518730335174,
-        0.4802150826199236,
-        0.4806693473418126,
-        0.4490669783008251,
-        0.3830687758301082,
-        0.2548711662869742
+        0.401232464861874,
+        0.4527262793006701,
+        0.4871690857585716,
+        0.5031154162970863,
+        0.4939821168264887,
+        0.4474635463990169,
+        0.3233716967145557
       ],
       "n_tied_candidates": 1,
       "tie_break_rule": "highest threshold among the tied maxima"
     },
     "moisture": {
       "threshold": 0.5,
-      "dice_at_selected_threshold": 0.2794085894194031,
+      "dice_at_selected_threshold": 0.3201612935751686,
       "metric": "dice",
       "candidate_thresholds": [
         0.3,
@@ -128,20 +128,20 @@
         0.9
       ],
       "candidate_dice": [
-        0.2024373331467529,
-        0.2404207658150688,
-        0.2794085894194031,
-        0.2769521931707578,
-        0.1718199233802071,
-        0.0243644979967721,
-        0.0001113542257173
+        0.240000984317541,
+        0.288887124125357,
+        0.3201612935751686,
+        0.2984494806117607,
+        0.1999525534174676,
+        0.0734994239474885,
+        0.0079046027770845
       ],
       "n_tied_candidates": 1,
       "tie_break_rule": "highest threshold among the tied maxima"
     },
     "delamination": {
-      "threshold": 0.5,
-      "dice_at_selected_threshold": 0.5043578810662124,
+      "threshold": 0.4,
+      "dice_at_selected_threshold": 0.5454301018502605,
       "metric": "dice",
       "candidate_thresholds": [
         0.3,
@@ -153,20 +153,20 @@
         0.9
       ],
       "candidate_dice": [
-        0.4266376574027408,
-        0.4847532037151055,
-        0.5043578810662124,
-        0.5001583726454069,
-        0.4585106253084047,
-        0.3654923182606317,
-        0.1848493606842014
+        0.5214864476262658,
+        0.5454301018502605,
+        0.5391684082321606,
+        0.5054466065679925,
+        0.4486172230319317,
+        0.3581860880113962,
+        0.2070690408047674
       ],
       "n_tied_candidates": 1,
       "tie_break_rule": "highest threshold among the tied maxima"
     },
     "surface": {
-      "threshold": 0.6,
-      "dice_at_selected_threshold": 0.3797425487877054,
+      "threshold": 0.7,
+      "dice_at_selected_threshold": 0.4268027919678706,
       "metric": "dice",
       "candidate_thresholds": [
         0.3,
@@ -178,81 +178,81 @@
         0.9
       ],
       "candidate_dice": [
-        0.2893164069967235,
-        0.3207447058921069,
-        0.3518045655207005,
-        0.3797425487877054,
-        0.3742033430072696,
-        0.2303288826588964,
-        0.0253881969577701
+        0.3281259299778107,
+        0.3615452488848122,
+        0.3917749778278037,
+        0.4178841823232131,
+        0.4268027919678706,
+        0.3807965789751856,
+        0.1486743954726259
       ],
       "n_tied_candidates": 1,
       "tie_break_rule": "highest threshold among the tied maxima"
     }
   },
   "calibrated_metrics": {
-    "macro_dice_present": 0.39876245276470956,
-    "macro_iou_present": 0.2519256368631113,
-    "macro_precision_present": 0.3721220318756362,
-    "macro_recall_present": 0.45092170464959086,
-    "micro_dice": 0.381550876423468,
-    "micro_iou": 0.23575092405765424,
-    "micro_precision": 0.3131429572199287,
-    "micro_recall": 0.48820132475309497,
-    "false_alarm_rate_empty_gt": 0.7151277013752456,
+    "macro_dice_present": 0.4150813777248175,
+    "macro_iou_present": 0.2669386587467996,
+    "macro_precision_present": 0.4056332067495154,
+    "macro_recall_present": 0.4308709100120045,
+    "micro_dice": 0.42164298175022474,
+    "micro_iou": 0.26714043582977226,
+    "micro_precision": 0.3945549069504198,
+    "micro_recall": 0.4527246893471202,
+    "false_alarm_rate_empty_gt": 0.7053045186640472,
     "per_class": {
       "crack": {
-        "threshold": 0.5,
-        "dice": 0.34347062236539827,
-        "iou": 0.2073435140980405,
-        "precision": 0.331682501953865,
-        "recall": 0.35612752816895205,
-        "false_alarm_rate_empty_gt": 0.795355587808418,
+        "threshold": 0.3,
+        "dice": 0.2520524279104676,
+        "iou": 0.14419907778421462,
+        "precision": 0.29471341306492793,
+        "recall": 0.22018040400472372,
+        "false_alarm_rate_empty_gt": 0.8925979680696662,
         "support_pixels": 44594132.0
       },
       "spalling": {
-        "threshold": 0.7,
-        "dice": 0.40492565181821133,
-        "iou": 0.2538600487681233,
-        "precision": 0.3740543629962862,
-        "recall": 0.44135104015870663,
-        "false_alarm_rate_empty_gt": 0.7364864864864865,
+        "threshold": 0.6,
+        "dice": 0.44292629509483855,
+        "iou": 0.2844607122318698,
+        "precision": 0.4355209551047796,
+        "recall": 0.4505878231725642,
+        "false_alarm_rate_empty_gt": 0.7207207207207207,
         "support_pixels": 109847660.0
       },
       "corrosion": {
         "threshold": 0.6,
-        "dice": 0.48066933901745396,
-        "iou": 0.31636914291363455,
-        "precision": 0.5386774680578693,
-        "recall": 0.43393999079941215,
-        "false_alarm_rate_empty_gt": 0.6836734693877551,
+        "dice": 0.5031159159201561,
+        "iou": 0.33610880179104097,
+        "precision": 0.5039507188285081,
+        "recall": 0.5022838741682385,
+        "false_alarm_rate_empty_gt": 0.8428571428571429,
         "support_pixels": 90796377.0
       },
       "moisture": {
         "threshold": 0.5,
-        "dice": 0.2794085924447822,
-        "iou": 0.16239101928434765,
-        "precision": 0.2143338599632411,
-        "recall": 0.40122653224626864,
-        "false_alarm_rate_empty_gt": 0.7792592592592592,
+        "dice": 0.3201610688333113,
+        "iou": 0.19059033749798368,
+        "precision": 0.2729993960064627,
+        "recall": 0.38702027803726646,
+        "false_alarm_rate_empty_gt": 0.7066666666666667,
         "support_pixels": 115065870.0
       },
       "delamination": {
-        "threshold": 0.5,
-        "dice": 0.5043579407616012,
-        "iou": 0.3372183455568421,
-        "precision": 0.48247132677555754,
-        "recall": 0.5283246232278718,
-        "false_alarm_rate_empty_gt": 0.4841463414634146,
+        "threshold": 0.4,
+        "dice": 0.5454298604105193,
+        "iou": 0.37497666531533125,
+        "precision": 0.5348294063501139,
+        "recall": 0.5564590188597065,
+        "false_alarm_rate_empty_gt": 0.3902439024390244,
         "support_pixels": 68278737.0
       },
       "surface": {
-        "threshold": 0.6,
-        "dice": 0.3797425701808104,
-        "iou": 0.23437175055767975,
-        "precision": 0.29151267150699806,
-        "recall": 0.5445605132963341,
-        "false_alarm_rate_empty_gt": 0.9325842696629213,
+        "threshold": 0.7,
+        "dice": 0.42680269817961225,
+        "iou": 0.27129635786035716,
+        "precision": 0.3917853511423003,
+        "recall": 0.46869406182952755,
+        "false_alarm_rate_empty_gt": 0.8269662921348314,
         "support_pixels": 412197294.0
       }
     }
