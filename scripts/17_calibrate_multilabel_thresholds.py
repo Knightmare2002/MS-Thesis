@@ -119,6 +119,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="per-class selection metric (default: eval.calibration.metric or 'dice')",
     )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Directory for the three calibrated artifacts "
+            "(default: the resolved --eval-dir)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -214,6 +222,12 @@ def main() -> None:
 
     patch_cfg = multilabel_patch_cfg(cfg)
     eval_dir = resolve_eval_dir(run_dir, args.eval_dir)
+    output_dir = ensure_dir(
+        Path(args.output_dir) if args.output_dir is not None else eval_dir
+    )
+
+    print(f"[calibration] input eval dir : {eval_dir.resolve()}")
+    print(f"[calibration] output dir     : {output_dir.resolve()}")
 
     calibration_cfg = cfg.eval.get("calibration", {}) or {}
     metric = str(args.metric or calibration_cfg.get("metric", "dice"))
@@ -320,8 +334,8 @@ def main() -> None:
     }
     calibrated_summary = pd.DataFrame([summary_row])
 
-    calibrated_per_class.to_csv(eval_dir / CALIBRATED_PER_CLASS_CSV, index=False)
-    calibrated_summary.to_csv(eval_dir / CALIBRATED_SUMMARY_CSV, index=False)
+    calibrated_per_class.to_csv(output_dir / CALIBRATED_PER_CLASS_CSV, index=False)
+    calibrated_summary.to_csv(output_dir / CALIBRATED_SUMMARY_CSV, index=False)
 
     payload = {
         "pipeline": "per-channel threshold calibration (additive)",
@@ -379,7 +393,7 @@ def main() -> None:
         "standard_artifacts_preserved": [STANDARD_SUMMARY_CSV, STANDARD_PER_CLASS_CSV],
         "note": CALIBRATION_NOTE,
     }
-    with open(eval_dir / THRESHOLDS_JSON, "w", encoding="utf-8") as fh:
+    with open(output_dir / THRESHOLDS_JSON, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
 
     print("\n--- calibrated per-class metrics (mixed thresholds) ---")
@@ -401,7 +415,7 @@ def main() -> None:
         )
     print(f"macro Dice @ per-class thresholds : {aggregated['macro_dice_present']:.4f}  (calibrated)")
     print(f"\n[calibration] {CALIBRATION_NOTE}")
-    print(f"[calibration] artifacts written to {ensure_dir(eval_dir).resolve()}:")
+    print(f"[calibration] artifacts written to {ensure_dir(output_dir).resolve()}:")
     for name in (THRESHOLDS_JSON, CALIBRATED_PER_CLASS_CSV, CALIBRATED_SUMMARY_CSV):
         print(f"  + {name}")
 
