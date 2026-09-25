@@ -1,0 +1,85 @@
+project:
+  seed: 42
+  output_dir: outputs
+data:
+  dacl10k:
+    root: datasets/dacl10k
+    train_split: train
+    val_split: validation
+    crack_labels:
+    - Crack
+    - ACrack
+  p1ml_patch:
+    task_name: dacl10k_multilabel_damage_patch
+    patch_size: 512
+    positive_patch_fraction: 0.6
+    min_positive_pixels: 256
+    max_negative_pixels: 0
+    max_crop_attempts: 100
+    patches_per_image: 4
+    eval_stride: 256
+    eval_batch_size: 4
+    blend_mode: gaussian
+    sanity_check_samples: 512
+    class_weights:
+      cache_path: outputs/stats/dacl10k_multilabel_class_weights.json
+      max_images: null
+      clip_min: 1.0
+      clip_max: 5.0
+  hard_negative_mining:
+    enabled: false
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+model:
+  arch: unetplusplus
+  encoder: resnet34
+  encoder_weights: imagenet
+  in_channels: 3
+  classes: 6
+  model_factory_encoder_weights: imagenet
+  effective_initialization: model_factory_encoder_weights=imagenet
+loss:
+  name: multilabel_bce_dice
+  bce_weight: 0.5
+  dice_weight: 0.5
+train:
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true
+  early_stopping_patience: 10
+  resume: false
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  scheduler:
+    t_0: 10
+    t_mult: 1
+    eta_min: 5.0e-06
+  selection_metric: macro_dice_present
+transfer:
+  init_checkpoint: null
+  source_name: P1-B4 DACL10K binary crack U-Net++/ResNet-34 best checkpoint
+  source_dataset: DACL10K_crack_binary
+  target_dataset: DACL10K_multilabel_damage
+  load_mode: partial_encoder_decoder
+  reset_optimizer: true
+eval:
+  threshold: 0.5
+  threshold_sweep:
+  - 0.3
+  - 0.4
+  - 0.5
+  - 0.6
+  - 0.7
+  - 0.8
+  - 0.9
+  n_qualitative_samples: 6
+run_provenance:
+  resumed_from_local_last_checkpoint: false
+  optimizer_state_initialization: fresh
+  scheduler_state_initialization: fresh
+  amp_scaler_state_initialization: fresh

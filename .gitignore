@@ -21,6 +21,8 @@ outputs/*
 *.jpg
 *.jpeg
 
+!outputs/runs/**/curves.png
+
 # Cache Python
 __pycache__/
 *.py[cod]

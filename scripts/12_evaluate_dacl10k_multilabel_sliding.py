@@ -75,6 +75,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory for evaluation artifacts. Defaults to <run-dir>/eval_multilabel_sliding.",
     )
+    parser.add_argument(
+    "--thresholds",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Override dello sweep globale, senza modificare il config della run.",
+    )
     return parser.parse_args()
 
 
@@ -501,9 +508,21 @@ def evaluate_sliding_multilabel(model, samples, cfg, device) -> tuple[pd.DataFra
 
 
 def main() -> None:
+    print(f"[debug] script: {Path(__file__).resolve()}", flush=True)
+    print(f"[debug] argv: {sys.argv[1:]!r}", flush=True)
     args = parse_args()
+    print(f"[debug] parsed thresholds: {args.thresholds!r}", flush=True)
     run_dir = Path(args.run_dir)
     cfg = load_config(run_dir / "config.yaml")
+    if args.thresholds is not None:
+        thresholds = args.thresholds
+        if len(set(thresholds)) != len(thresholds):
+            raise ValueError("Le soglie devono essere distinte.")
+        if any(not 0.0 < t < 1.0 for t in thresholds):
+            raise ValueError("Ogni soglia deve essere strettamente tra 0 e 1.")
+        cfg["eval"]["threshold_sweep"] = sorted(thresholds)
+    print(f"[eval] threshold sweep: {list(cfg.eval.threshold_sweep)}")
+
     seed_everything(cfg.project.seed)
     device = get_device()
 
