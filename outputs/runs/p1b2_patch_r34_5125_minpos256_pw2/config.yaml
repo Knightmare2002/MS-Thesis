@@ -1,0 +1,84 @@
+project:
+  seed: 42
+  output_dir: outputs
+data:
+  crackseg9k:
+    images_dir: datasets/crackseg9k/images
+    masks_dir: datasets/crackseg9k/masks
+    mask_threshold: 0
+    val_fraction: 0.15
+    test_fraction: 0.15
+  dacl10k:
+    root: datasets/dacl10k
+    train_split: train
+    val_split: validation
+    crack_labels:
+    - Crack
+    - ACrack
+  p1:
+    task_name: dacl10k_crack_binary
+    train_positive_fraction: 0.5
+    use_weighted_sampler: true
+    save_qualitative_split: val
+  p1_patch:
+    task_name: dacl10k_crack_patch_glb_positive_quota
+    patch_size: 512
+    positive_patch_fraction: 0.6
+    min_positive_pixels: 256
+    max_negative_pixels: 0
+    max_crop_attempts: 100
+    patches_per_image: 4
+    eval_stride: 256
+    eval_batch_size: 4
+    blend_mode: gaussian
+    sanity_check_samples: 512
+  hard_negative_mining:
+    enabled: false
+    source_checkpoint: outputs/runs/p1_patch_glb_positive_quota_sampling_7060_posw2to5/best.pt
+    pool_path: outputs/runs/p1_patch_glb_positive_quota_sampling_7060_posw2to5/hard_negative_pool_train.json
+    candidate_stride: 256
+    top_k_per_image: 3
+    probability_threshold: 0.5
+    min_mean_probability: 0.05
+    hard_negative_fraction: 0.5
+    negative_images_only: true
+    refresh_each_epoch: false
+    seed: 42
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+model:
+  arch: unet
+  encoder: resnet34
+  encoder_weights: imagenet
+  in_channels: 3
+  classes: 1
+loss:
+  bce_weight: 0.5
+  dice_weight: 0.5
+  pos_weight: 2.0
+train:
+  epochs: 30
+  batch_size: 4
+  accumulation_steps: 2
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true
+  early_stopping_patience: 10
+  resume: true
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  scheduler:
+    t_0: 10
+    t_mult: 1
+    eta_min: 5.0e-06
+eval:
+  threshold: 0.7
+  threshold_sweep:
+  - 0.3
+  - 0.4
+  - 0.5
+  - 0.6
+  - 0.7
+  n_qualitative_samples: 6

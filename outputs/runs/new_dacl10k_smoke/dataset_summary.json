@@ -1,0 +1,57 @@
+{
+  "task": "dacl10k_crack_patch_glb_positive_quota",
+  "target_labels": [
+    "Crack",
+    "ACrack"
+  ],
+  "official_train_split": "train",
+  "official_val_split": "validation",
+  "train_images": {
+    "n_images": 64,
+    "n_positive": 7,
+    "n_negative": 57,
+    "positive_fraction": 0.109375,
+    "negative_fraction": 0.890625
+  },
+  "validation_images": {
+    "n_images": 32,
+    "n_positive": 7,
+    "n_negative": 25,
+    "positive_fraction": 0.21875,
+    "negative_fraction": 0.78125
+  },
+  "patch_sampling": {
+    "patch_size": 512,
+    "patches_per_image": 4,
+    "positive_patch_fraction": 0.6,
+    "min_positive_pixels": 256,
+    "max_negative_pixels": 0,
+    "max_crop_attempts": 100
+  },
+  "hard_negative_mining": {
+    "enabled": false,
+    "source_checkpoint": null,
+    "pool_path": null,
+    "pool_size": 0,
+    "hard_negative_fraction_among_negative": 0.0,
+    "n_hard_negative_patch_slots": 0,
+    "n_random_negative_patch_slots": 102,
+    "candidate_stride": null,
+    "top_k_per_image": null,
+    "min_mean_probability": null,
+    "negative_images_only": null
+  },
+  "sampling_sanity_check": {
+    "n_samples": 256,
+    "positive_patches": 151,
+    "negative_patches": 104,
+    "intermediate_patches": 1,
+    "positive_fraction_observed": 0.58984375,
+    "negative_fraction_observed": 0.40625,
+    "intermediate_fraction_observed": 0.00390625,
+    "mean_crack_pixels": 4863.6640625,
+    "min_crack_pixels": 0,
+    "max_crack_pixels": 21837
+  },
+  "validation_note": "Training-time validation uses one random-free normalized patch per image only as an optimization monitor. Full-image metrics require sliding-window inference and are written by scripts/08_evaluate_dacl10k_sliding.py."
+}

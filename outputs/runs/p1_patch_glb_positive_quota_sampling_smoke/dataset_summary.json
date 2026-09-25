@@ -1,0 +1,44 @@
+{
+  "task": "dacl10k_crack_patch_glb_positive_quota",
+  "target_labels": [
+    "Crack",
+    "ACrack"
+  ],
+  "official_train_split": "train",
+  "official_val_split": "validation",
+  "train_images": {
+    "n_images": 128,
+    "n_positive": 20,
+    "n_negative": 108,
+    "positive_fraction": 0.15625,
+    "negative_fraction": 0.84375
+  },
+  "validation_images": {
+    "n_images": 32,
+    "n_positive": 7,
+    "n_negative": 25,
+    "positive_fraction": 0.21875,
+    "negative_fraction": 0.78125
+  },
+  "patch_sampling": {
+    "patch_size": 512,
+    "patches_per_image": 4,
+    "positive_patch_fraction": 0.7,
+    "min_positive_pixels": 64,
+    "max_negative_pixels": 0,
+    "max_crop_attempts": 30
+  },
+  "sampling_sanity_check": {
+    "n_samples": 512,
+    "positive_patches": 350,
+    "negative_patches": 161,
+    "intermediate_patches": 1,
+    "positive_fraction_observed": 0.68359375,
+    "negative_fraction_observed": 0.314453125,
+    "intermediate_fraction_observed": 0.001953125,
+    "mean_crack_pixels": 4576.927734375,
+    "min_crack_pixels": 0,
+    "max_crack_pixels": 30797
+  },
+  "validation_note": "Training-time validation uses one random-free normalized patch per image only as an optimization monitor. Full-image metrics require sliding-window inference and are written by scripts/08_evaluate_dacl10k_sliding.py."
+}

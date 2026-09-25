@@ -1,0 +1,18 @@
+{
+  "split": "validation",
+  "target_labels": [
+    "Crack",
+    "ACrack"
+  ],
+  "inference": {
+    "patch_size": 512,
+    "stride": 256,
+    "batch_size": 4,
+    "blend_mode": "gaussian"
+  },
+  "n_images": 16,
+  "n_positive": 1,
+  "n_negative": 15,
+  "positive_fraction": 0.0625,
+  "negative_fraction": 0.9375
+}

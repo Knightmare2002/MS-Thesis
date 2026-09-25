@@ -1,0 +1,12 @@
+{
+  "split": "validation",
+  "target_labels": [
+    "Crack",
+    "ACrack"
+  ],
+  "n_images": 975,
+  "n_positive": 286,
+  "n_negative": 689,
+  "positive_fraction": 0.29333333333333333,
+  "negative_fraction": 0.7066666666666667
+}

@@ -1,0 +1,40 @@
+{
+  "experiment_type": "sequential_transfer",
+  "source_name": "P0 Crackseg9k U-Net++ ResNet34 best validation checkpoint",
+  "source_dataset": "CrackSeg9K",
+  "target_dataset": "DACL10K",
+  "direction": "CrackSeg9K_to_DACL10K",
+  "initialization": "external_checkpoint_model_weights_only",
+  "optimizer_reinitialized": true,
+  "scheduler_reinitialized": true,
+  "amp_scaler_reinitialized": true,
+  "transfer_config": {
+    "init_checkpoint": "outputs/runs/p0_unetplusplus_r34_512_pw2/best.pt",
+    "source_name": "P0 Crackseg9k U-Net++ ResNet34 best validation checkpoint",
+    "source_dataset": "CrackSeg9K",
+    "target_dataset": "DACL10K",
+    "load_mode": "full_model",
+    "strict": true,
+    "reset_optimizer": true
+  },
+  "checkpoint_load": {
+    "checkpoint_path": "C:\\Users\\Samuele_Caruso\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p0_unetplusplus_r34_512_pw2\\best.pt",
+    "checkpoint_epoch": 9,
+    "checkpoint_best_dice": 0.7411257608637652,
+    "checkpoint_keys": [
+      "best_dice",
+      "epoch",
+      "epochs_without_improvement",
+      "model",
+      "optimizer",
+      "scaler",
+      "scheduler"
+    ],
+    "strict": true,
+    "missing_keys": [],
+    "unexpected_keys": [],
+    "factory_model_sha256": "3940ab3c4fa3e55231139e0fcd8e2ef095ddd7c32ae8017fa2fa5637d20f0fce",
+    "source_model_sha256": "302094a5fa2c7445673b79541c31fed06f5370f440272349a2ca61ae872ab782",
+    "initialized_model_sha256": "302094a5fa2c7445673b79541c31fed06f5370f440272349a2ca61ae872ab782"
+  }
+}

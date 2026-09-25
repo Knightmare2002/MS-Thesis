@@ -1,0 +1,6 @@
+dataset,target,patch_size,stride,blend_mode,threshold,iou,dice,precision,recall,pixel_accuracy,iou_image_mean,dice_image_mean,n_images_with_crack,n_images_empty_gt,false_alarm_rate_empty_gt
+dacl10k_validation_sliding,Crack+ACrack,512,256,gaussian,0.3,0.001303977708475515,0.0026045591299052274,0.001303977708475515,0.999999999988808,0.6422926636702858,0.014693427830934525,0.028961313888430595,1,15,1.0
+dacl10k_validation_sliding,Crack+ACrack,512,256,gaussian,0.4,0.0010166410962724232,0.002031217173690618,0.001025583527347682,0.10442081701058285,0.9520771791620687,0.014611686579883099,0.028802519664168358,1,15,1.0
+dacl10k_validation_sliding,Crack+ACrack,512,256,gaussian,0.5,0.0,0.0,0.0,0.0,0.9976452976834616,0.0,0.0,1,15,1.0
+dacl10k_validation_sliding,Crack+ACrack,512,256,gaussian,0.6,0.0,0.0,0.0,0.0,0.9988809061226076,0.0,0.0,1,15,0.4
+dacl10k_validation_sliding,Crack+ACrack,512,256,gaussian,0.7,0.0,0.0,0.0,0.0,0.9990030660736307,0.0,0.0,1,15,0.4

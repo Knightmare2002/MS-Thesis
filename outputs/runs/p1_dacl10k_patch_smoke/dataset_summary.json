@@ -1,0 +1,31 @@
+{
+  "task": "dacl10k_crack_patch",
+  "target_labels": [
+    "Crack",
+    "ACrack"
+  ],
+  "official_train_split": "train",
+  "official_val_split": "validation",
+  "train_images": {
+    "n_images": 64,
+    "n_positive": 7,
+    "n_negative": 57,
+    "positive_fraction": 0.109375,
+    "negative_fraction": 0.890625
+  },
+  "validation_images": {
+    "n_images": 32,
+    "n_positive": 7,
+    "n_negative": 25,
+    "positive_fraction": 0.21875,
+    "negative_fraction": 0.78125
+  },
+  "patch_sampling": {
+    "patch_size": 512,
+    "patches_per_image": 4,
+    "positive_patch_fraction": 0.7,
+    "min_positive_pixels": 64,
+    "max_crop_attempts": 30
+  },
+  "validation_note": "Training-time validation uses one random-free normalized patch per image only as an optimization monitor. Full-image metrics require sliding-window inference and are written by scripts/08_evaluate_dacl10k_sliding.py."
+}

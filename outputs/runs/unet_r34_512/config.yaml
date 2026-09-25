@@ -1,0 +1,50 @@
+project:
+  seed: 42
+  output_dir: outputs
+data:
+  crackseg9k:
+    images_dir: datasets/crackseg9k/images
+    masks_dir: datasets/crackseg9k/masks
+    mask_threshold: 0
+    val_fraction: 0.15
+    test_fraction: 0.15
+  dacl10k:
+    root: datasets/dacl10k
+    train_split: train
+    val_split: validation
+  image_size: 512
+  num_workers: 6
+  persistent_workers: true
+  prefetch_factor: 4
+model:
+  arch: unet
+  encoder: resnet34
+  encoder_weights: imagenet
+  in_channels: 3
+  classes: 1
+loss:
+  bce_weight: 0.5
+  dice_weight: 0.5
+  pos_weight: 2.0
+train:
+  epochs: 20
+  batch_size: 8
+  accumulation_steps: 1
+  lr: 0.0003
+  weight_decay: 0.0001
+  amp: true
+  scheduler:
+    t_0: 5
+    t_mult: 2
+    eta_min: 5.0e-06
+  early_stopping_patience: 8
+  resume: true
+eval:
+  threshold: 0.5
+  threshold_sweep:
+  - 0.3
+  - 0.4
+  - 0.5
+  - 0.6
+  - 0.7
+  n_qualitative_samples: 8

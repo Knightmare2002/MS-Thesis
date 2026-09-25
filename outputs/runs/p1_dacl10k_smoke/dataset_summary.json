@@ -1,0 +1,27 @@
+{
+  "task": "dacl10k_crack_binary",
+  "target_labels": [
+    "Crack",
+    "ACrack"
+  ],
+  "official_train_split": "train",
+  "official_val_split": "validation",
+  "train": {
+    "n_images": 64,
+    "n_positive": 7,
+    "n_negative": 57,
+    "positive_fraction": 0.109375,
+    "negative_fraction": 0.890625
+  },
+  "validation": {
+    "n_images": 32,
+    "n_positive": 7,
+    "n_negative": 25,
+    "positive_fraction": 0.21875,
+    "negative_fraction": 0.78125
+  },
+  "weighted_sampler": {
+    "enabled": true,
+    "desired_positive_fraction": 0.5
+  }
+}
