@@ -765,6 +765,8 @@ class Dacl10kMultilabelPatchDataset(Dataset):
         max_negative_pixels: int = 0,
         max_crop_attempts: int = 100,
         patches_per_image: int = 4,
+        class_balanced: bool = False,
+        class_sampling_power: float = 0.5,
     ) -> None:
         if patch_size <= 0:
             raise ValueError("patch_size must be positive.")
@@ -815,6 +817,21 @@ class Dacl10kMultilabelPatchDataset(Dataset):
         self.n_positive_patches = round(self.n_patches * self.positive_patch_fraction)
         self.n_negative_patches = self.n_patches - self.n_positive_patches
 
+        self.class_balanced = bool(class_balanced)
+        self.class_sampling_probs = None
+        if self.class_balanced:
+            counts = np.array([len(ids) for ids in self.class_positive_indices], dtype=np.float64)
+
+            if (counts == 0).any():
+                missing = [n for n, c in zip(UNIFIED_DAMAGE_CLASSES, counts) if c == 0]
+                raise RuntimeError(f"No image can anchor a positive patch for: {missing}")
+
+            weights = counts ** float(class_sampling_power)
+            self.class_sampling_probs = weights / weights.sum()
+
+            for name, n, q in zip(UNIFIED_DAMAGE_CLASSES, counts, self.class_sampling_probs):
+                print(f"[patch-dataset] class-balanced | {name:>13}: {int(n):5d} images | q={q:.3f}")
+
         print(
             "[patch-dataset] multilabel composition | "
             f"total={self.n_patches} | positive={self.n_positive_patches} | "
@@ -829,6 +846,7 @@ class Dacl10kMultilabelPatchDataset(Dataset):
         Only the JSON annotations are decoded here, never the JPEGs. As in the binary dataset this is a necessary but not sufficient condition for a single crop, which `_positive_crop` handles statistically.
         """
         positive_indices = []
+        self.class_positive_indices = [[] for _ in range(self.n_channels)]
 
         for index, (_, annotation_path) in enumerate(self.samples):
             annotation = load_annotation(annotation_path)
@@ -836,6 +854,10 @@ class Dacl10kMultilabelPatchDataset(Dataset):
 
             if int((masks.max(axis=0) > 0).sum()) >= self.min_positive_pixels:
                 positive_indices.append(index)
+            
+            per_channel = (masks > 0).reshape(self.n_channels, -1).sum(axis=1)
+            for channel in np.flatnonzero(per_channel >= self.min_positive_pixels):
+                self.class_positive_indices[int(channel)].append(index)
 
         return positive_indices
 
@@ -861,10 +883,10 @@ class Dacl10kMultilabelPatchDataset(Dataset):
         left = np.random.randint(0, width - self.patch_size + 1)
         return _crop_at(image, mask, top, left, self.patch_size)
 
-    def _positive_crop(self, image: np.ndarray, mask: np.ndarray):
+    def _positive_crop(self, image: np.ndarray, mask: np.ndarray,  anchor_channel: int | None = None):
         """Return a damage-anchored crop, falling back to the richest one found."""
-        union = mask.max(axis=2)
-        damage_y, damage_x = np.where(union > 0)
+        anchor = mask[..., anchor_channel] if anchor_channel is not None else mask.max(axis=2)
+        damage_y, damage_x = np.where(anchor > 0)
         if len(damage_y) == 0:
             raise RuntimeError("Positive source image unexpectedly has an empty damage mask.")
 
@@ -885,7 +907,12 @@ class Dacl10kMultilabelPatchDataset(Dataset):
             )
 
             image_patch, mask_patch = _crop_at(image, mask, top, left, self.patch_size)
-            n_positive = _union_positive_pixels(mask_patch)
+            
+            n_positive = (
+                int((mask_patch[..., anchor_channel] > 0).sum())
+                if anchor_channel is not None
+                else _union_positive_pixels(mask_patch)
+            )
 
             if n_positive >= self.min_positive_pixels:
                 return image_patch, mask_patch
@@ -911,9 +938,14 @@ class Dacl10kMultilabelPatchDataset(Dataset):
 
     def __getitem__(self, index: int):
         if index < self.n_positive_patches:
-            sample_index = int(np.random.choice(self.positive_sample_indices))
+            channel = None
+            if self.class_balanced:
+                channel = int(np.random.choice(self.n_channels, p=self.class_sampling_probs))
+                sample_index = int(np.random.choice(self.class_positive_indices[channel]))
+            else:
+                sample_index = int(np.random.choice(self.positive_sample_indices))
             image, mask = self._load_sample(sample_index)
-            image_patch, mask_patch = self._positive_crop(image, mask)
+            image_patch, mask_patch = self._positive_crop(image, mask, anchor_channel=channel)
         else:
             sample_index = int(np.random.choice(self.negative_source_indices))
             image, mask = self._load_sample(sample_index)

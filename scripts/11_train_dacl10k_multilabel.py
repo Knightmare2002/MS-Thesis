@@ -285,6 +285,8 @@ def main() -> None:
         max_negative_pixels=patch_cfg.max_negative_pixels,
         max_crop_attempts=patch_cfg.max_crop_attempts,
         patches_per_image=patch_cfg.patches_per_image,
+        class_balanced=bool(patch_cfg.get("class_balanced", False)),
+        class_sampling_power=float(patch_cfg.get("class_sampling_power", 0.5)),
     )
     val_ds = Dacl10kMultilabelCenterPatchDataset(
         samples=val_samples,
