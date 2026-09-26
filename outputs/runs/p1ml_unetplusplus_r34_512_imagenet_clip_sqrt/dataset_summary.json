@@ -1,0 +1,142 @@
+{
+  "task": "dacl10k_multilabel_damage_patch",
+  "task_type": "multilabel_damage_segmentation",
+  "n_classes": 6,
+  "class_names": [
+    "crack",
+    "spalling",
+    "corrosion",
+    "moisture",
+    "delamination",
+    "surface"
+  ],
+  "class_mapping_19_to_6": {
+    "crack": [
+      "Crack",
+      "ACrack"
+    ],
+    "spalling": [
+      "Rockpocket",
+      "Cavity",
+      "Spalling"
+    ],
+    "corrosion": [
+      "Rust",
+      "ExposedRebars",
+      "WConccor"
+    ],
+    "moisture": [
+      "Wetspot",
+      "Efflorescence"
+    ],
+    "delamination": [
+      "Hollowareas"
+    ],
+    "surface": [
+      "Graffiti",
+      "Weathering",
+      "Restformwork"
+    ]
+  },
+  "official_train_split": "train",
+  "official_val_split": "validation",
+  "train_images": {
+    "n_images": 6935,
+    "n_images_with_any_damage": 6444,
+    "n_images_without_any_damage": 491,
+    "n_images_per_class": {
+      "crack": 1959,
+      "spalling": 3705,
+      "corrosion": 3572,
+      "moisture": 2168,
+      "delamination": 1097,
+      "surface": 3418
+    },
+    "image_fraction_per_class": {
+      "crack": 0.282480173035328,
+      "spalling": 0.5342465753424658,
+      "corrosion": 0.5150684931506849,
+      "moisture": 0.3126171593366979,
+      "delamination": 0.15818312905551551,
+      "surface": 0.4928622927180966
+    },
+    "mean_classes_per_image": 2.295457822638789
+  },
+  "validation_images": {
+    "n_images": 975,
+    "n_images_with_any_damage": 920,
+    "n_images_without_any_damage": 55,
+    "n_images_per_class": {
+      "crack": 286,
+      "spalling": 531,
+      "corrosion": 485,
+      "moisture": 300,
+      "delamination": 155,
+      "surface": 530
+    },
+    "image_fraction_per_class": {
+      "crack": 0.29333333333333333,
+      "spalling": 0.5446153846153846,
+      "corrosion": 0.49743589743589745,
+      "moisture": 0.3076923076923077,
+      "delamination": 0.15897435897435896,
+      "surface": 0.5435897435897435
+    },
+    "mean_classes_per_image": 2.345641025641026
+  },
+  "patch_sampling": {
+    "patch_size": 512,
+    "patches_per_image": 4,
+    "positive_patch_fraction": 0.6,
+    "min_positive_pixels": 256,
+    "max_negative_pixels": 0,
+    "max_crop_attempts": 100,
+    "positive_criterion": "union of the 6 damage channels"
+  },
+  "hard_negative_mining": {
+    "enabled": false
+  },
+  "class_weights": {
+    "pos_weight": [
+      7.873838451294867,
+      5.6048745366975155,
+      6.06734764031312,
+      4.904663395320802,
+      6.962421365815614,
+      3.1170976080089834
+    ],
+    "pos_weight_raw": [
+      61.99733195708956,
+      31.414618572120187,
+      36.81270738841318,
+      24.05572302139978,
+      48.475311275165765,
+      9.716297497855326
+    ],
+    "clip_min": 1.0,
+    "clip_max": 10.0,
+    "estimated_on": "official DACL10K train split only"
+  },
+  "selection_metric": "macro_dice_present",
+  "sampling_sanity_check": {
+    "n_samples": 512,
+    "positive_patches": 306,
+    "negative_patches": 206,
+    "intermediate_patches": 0,
+    "positive_fraction_observed": 0.59765625,
+    "negative_fraction_observed": 0.40234375,
+    "intermediate_fraction_observed": 0.0,
+    "mean_union_damage_pixels": 68519.99609375,
+    "min_union_damage_pixels": 0,
+    "max_union_damage_pixels": 262144,
+    "patch_fraction_per_class": {
+      "crack": 0.119140625,
+      "spalling": 0.291015625,
+      "corrosion": 0.23828125,
+      "moisture": 0.126953125,
+      "delamination": 0.09375,
+      "surface": 0.283203125
+    }
+  },
+  "validation_note": "Training-time validation uses one deterministic damage-centred patch per image as an optimization monitor only. Full-image multilabel metrics are written by scripts/12_evaluate_dacl10k_multilabel_sliding.py."
+}

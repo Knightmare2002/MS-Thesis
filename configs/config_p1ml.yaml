@@ -44,7 +44,8 @@ data:
       cache_path: "outputs/stats/dacl10k_multilabel_class_weights.json"
       max_images: null        # null = full train split; set e.g. 2000 to subsample
       clip_min: 1.0
-      clip_max: 5.0
+      clip_max: 10.0
+      power: 0.5
 
   # Hard negative mining stays OFF in the first P1ML pipeline: the P1-B3 pool was mined by a binary crack model and would bias the multilabel negatives.
   hard_negative_mining:
@@ -99,5 +100,5 @@ transfer:
 
 eval:
   threshold: 0.5
-  threshold_sweep: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+  threshold_sweep: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
   n_qualitative_samples: 6

@@ -198,6 +198,7 @@ def multilabel_pos_weights(
     stats: dict,
     clip_min: float = 1.0,
     clip_max: float = 20.0,
+    power: float = 1.0,
     ) -> dict:
     """Turn per-channel pixel statistics into a clipped pos_weight vector.
 
@@ -229,7 +230,8 @@ def multilabel_pos_weights(
         )
 
     raw = negative / positive
-    clipped = np.clip(raw, clip_min, clip_max)
+    scaled = raw ** float(power)
+    clipped = np.clip(scaled, clip_min, clip_max)
 
     return {
         "class_names": list(stats["class_names"]),
@@ -237,7 +239,8 @@ def multilabel_pos_weights(
         "pos_weight": clipped.tolist(),
         "clip_min": float(clip_min),
         "clip_max": float(clip_max),
-        "n_clipped": int((raw > clip_max).sum() + (raw < clip_min).sum()),
+        "power": float(power),
+        "n_clipped": int((scaled > clip_max).sum() + (scaled < clip_min).sum()),
         "source": {
             "split_size": stats["split_size"],
             "n_images_used": stats["n_images_used"],
@@ -285,6 +288,7 @@ def resolve_multilabel_class_weights(
             stats,
             clip_min=float(weights_cfg["clip_min"]),
             clip_max=float(weights_cfg["clip_max"]),
+            power=float(weights_cfg["power"])
         )
         payload["pixel_statistics"] = stats
         ensure_dir(cache_path.parent)

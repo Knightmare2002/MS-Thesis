@@ -199,6 +199,7 @@ def resolve_class_weights(cfg, train_samples, run_dir: Path, recompute: bool) ->
             stats,
             clip_min=float(weights_cfg.clip_min),
             clip_max=float(weights_cfg.clip_max),
+            power=float(weights_cfg.power)
         )
         payload["pixel_statistics"] = stats
         ensure_dir(cache_path.parent)
