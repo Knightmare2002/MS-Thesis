@@ -31,6 +31,8 @@ data:
     max_negative_pixels: 0
     max_crop_attempts: 100
     patches_per_image: 4
+    class_balanced: true
+    class_sampling_power: 0.5
 
     eval_stride: 256
     eval_batch_size: 4
