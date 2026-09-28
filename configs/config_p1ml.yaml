@@ -34,6 +34,8 @@ data:
     class_balanced: true
     class_sampling_power: 0.5
 
+    augmentation: "t4"  # "base" or "t4" (stronger)
+
     eval_stride: 256
     eval_batch_size: 4
     blend_mode: "gaussian"

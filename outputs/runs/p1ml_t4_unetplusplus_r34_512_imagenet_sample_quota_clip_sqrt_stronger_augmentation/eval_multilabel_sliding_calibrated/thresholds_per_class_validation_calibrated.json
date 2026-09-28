@@ -1,0 +1,291 @@
+{
+  "pipeline": "per-channel threshold calibration (additive)",
+  "run_dir": "/home/sam/Thesis/MS-Thesis/outputs/runs/p1ml_t4_unetplusplus_r34_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation",
+  "run_family": "P1ML_single_head",
+  "created_utc": "2026-09-28T15:09:34+00:00",
+  "checkpoint": {
+    "path": "/home/sam/Thesis/MS-Thesis/outputs/runs/p1ml_t4_unetplusplus_r34_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation/best.pt",
+    "name": "best.pt",
+    "epoch": 21,
+    "best_monitor_metric": 0.504566524183577,
+    "selection_metric_of_the_run": "macro_dice_present"
+  },
+  "split": "validation",
+  "n_images": 975,
+  "source_sweep_csv": "/home/sam/Thesis/MS-Thesis/outputs/runs/p1ml_t4_unetplusplus_r34_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation/eval_multilabel_sliding/metrics_dacl10k_val_multilabel_per_class.csv",
+  "candidate_thresholds": [
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9
+  ],
+  "selection_metric": "dice",
+  "tie_break": "highest threshold among the tied maxima",
+  "inference": {
+    "patch_size": 512,
+    "stride": 256,
+    "batch_size": 4,
+    "blend_mode": "gaussian"
+  },
+  "thresholds": {
+    "threshold_crack": 0.5,
+    "threshold_spalling": 0.7,
+    "threshold_corrosion": 0.7,
+    "threshold_moisture": 0.5,
+    "threshold_delamination": 0.6,
+    "threshold_surface": 0.5
+  },
+  "per_class_selection": {
+    "crack": {
+      "threshold": 0.5,
+      "dice_at_selected_threshold": 0.4063858694331472,
+      "metric": "dice",
+      "candidate_thresholds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ],
+      "candidate_dice": [
+        0.1246549482496339,
+        0.2352267275393374,
+        0.3231323495229453,
+        0.3842011787932267,
+        0.4063858694331472,
+        0.3873253624281159,
+        0.3317420646977345,
+        0.2434002082615474,
+        0.1280415150997195
+      ],
+      "n_tied_candidates": 1,
+      "tie_break_rule": "highest threshold among the tied maxima"
+    },
+    "spalling": {
+      "threshold": 0.7,
+      "dice_at_selected_threshold": 0.4250575849349181,
+      "metric": "dice",
+      "candidate_thresholds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ],
+      "candidate_dice": [
+        0.1556686641851973,
+        0.2288601320470885,
+        0.2908802914241588,
+        0.3445665287199164,
+        0.3874128076951822,
+        0.4173313493475803,
+        0.4250575849349181,
+        0.3830791055955455,
+        0.2531830738609821
+      ],
+      "n_tied_candidates": 1,
+      "tie_break_rule": "highest threshold among the tied maxima"
+    },
+    "corrosion": {
+      "threshold": 0.7,
+      "dice_at_selected_threshold": 0.4986680051023517,
+      "metric": "dice",
+      "candidate_thresholds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ],
+      "candidate_dice": [
+        0.1772932212037795,
+        0.2694946370162174,
+        0.3437163420047632,
+        0.4061575663823844,
+        0.4536961960679075,
+        0.4868929830431168,
+        0.4986680051023517,
+        0.466170253622302,
+        0.3188069430692965
+      ],
+      "n_tied_candidates": 1,
+      "tie_break_rule": "highest threshold among the tied maxima"
+    },
+    "moisture": {
+      "threshold": 0.5,
+      "dice_at_selected_threshold": 0.2732906800955651,
+      "metric": "dice",
+      "candidate_thresholds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ],
+      "candidate_dice": [
+        0.1140795844205728,
+        0.1607129215238283,
+        0.2046438275283691,
+        0.2439377022338059,
+        0.2732906800955651,
+        0.2654645568655108,
+        0.1999717064285608,
+        0.0844318793523738,
+        0.0060632897394872
+      ],
+      "n_tied_candidates": 1,
+      "tie_break_rule": "highest threshold among the tied maxima"
+    },
+    "delamination": {
+      "threshold": 0.6,
+      "dice_at_selected_threshold": 0.5411472774023116,
+      "metric": "dice",
+      "candidate_thresholds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ],
+      "candidate_dice": [
+        0.1498900798229413,
+        0.278912005230072,
+        0.3820078366533772,
+        0.4627868322915172,
+        0.5171477202078939,
+        0.5411472774023116,
+        0.5245285017196799,
+        0.4628890613847979,
+        0.3149010719318854
+      ],
+      "n_tied_candidates": 1,
+      "tie_break_rule": "highest threshold among the tied maxima"
+    },
+    "surface": {
+      "threshold": 0.5,
+      "dice_at_selected_threshold": 0.3866860464387084,
+      "metric": "dice",
+      "candidate_thresholds": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ],
+      "candidate_dice": [
+        0.2416816697198793,
+        0.2895085411048581,
+        0.3372576921971146,
+        0.3735790781296969,
+        0.3866860464387084,
+        0.3479785810909345,
+        0.2384070244833079,
+        0.0868542327670088,
+        0.000995981463376
+      ],
+      "n_tied_candidates": 1,
+      "tie_break_rule": "highest threshold among the tied maxima"
+    }
+  },
+  "calibrated_metrics": {
+    "macro_dice_present": 0.42187254047185974,
+    "macro_iou_present": 0.27099067007022465,
+    "macro_precision_present": 0.40380029574004844,
+    "macro_recall_present": 0.4550874867800237,
+    "micro_dice": 0.393649815634165,
+    "micro_iou": 0.24505853049070528,
+    "micro_precision": 0.34648119080701284,
+    "micro_recall": 0.4556850342563424,
+    "false_alarm_rate_empty_gt": 0.6946393488633175,
+    "per_class": {
+      "crack": {
+        "threshold": 0.5,
+        "dice": 0.4063859575924634,
+        "iou": 0.25500902149338484,
+        "precision": 0.3770778495857588,
+        "recall": 0.4406339156909693,
+        "false_alarm_rate_empty_gt": 0.8388969521044993,
+        "support_pixels": 44594132.0
+      },
+      "spalling": {
+        "threshold": 0.7,
+        "dice": 0.42505751327836744,
+        "iou": 0.2698876415247126,
+        "precision": 0.4318494930803793,
+        "recall": 0.4184758692174231,
+        "false_alarm_rate_empty_gt": 0.7184684684684685,
+        "support_pixels": 109847660.0
+      },
+      "corrosion": {
+        "threshold": 0.7,
+        "dice": 0.4986679993094354,
+        "iou": 0.332150383179779,
+        "precision": 0.5477999697112448,
+        "recall": 0.4576238873496015,
+        "false_alarm_rate_empty_gt": 0.7142857142857143,
+        "support_pixels": 90796377.0
+      },
+      "moisture": {
+        "threshold": 0.5,
+        "dice": 0.2732905939209751,
+        "iou": 0.1582724880972054,
+        "precision": 0.21100766578619945,
+        "recall": 0.38773919668794893,
+        "false_alarm_rate_empty_gt": 0.7585185185185185,
+        "support_pixels": 115065870.0
+      },
+      "delamination": {
+        "threshold": 0.6,
+        "dice": 0.5411471450129226,
+        "iou": 0.37094018300955783,
+        "precision": 0.5261022597368356,
+        "recall": 0.5570778352270919,
+        "false_alarm_rate_empty_gt": 0.36829268292682926,
+        "support_pixels": 68278737.0
+      },
+      "surface": {
+        "threshold": 0.5,
+        "dice": 0.38668603371699467,
+        "iou": 0.23968430311670824,
+        "precision": 0.32896453653987284,
+        "recall": 0.46897421650710774,
+        "false_alarm_rate_empty_gt": 0.9303370786516854,
+        "support_pixels": 412197294.0
+      }
+    }
+  },
+  "standard_artifacts_preserved": [
+    "metrics_dacl10k_val_multilabel_sliding.csv",
+    "metrics_dacl10k_val_multilabel_per_class.csv"
+  ],
+  "note": "validation-calibrated thresholds: selected on the same split they are evaluated on, therefore OPTIMISTIC. Not a blind-test result. Any held-out claim (testdev/testchallenge or the Lincoln Street case study) must reuse these frozen thresholds without re-selecting them."
+}

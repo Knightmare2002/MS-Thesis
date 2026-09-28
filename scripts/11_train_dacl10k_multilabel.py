@@ -278,7 +278,9 @@ def main() -> None:
 
     train_ds = Dacl10kMultilabelPatchDataset(
         samples=train_samples,
-        transform=patch_train_transform_multilabel(),
+        transform=patch_train_transform_multilabel(
+            profile=str(patch_cfg.get("augmentation", "base"))
+        ),
         patch_size=patch_cfg.patch_size,
         positive_patch_fraction=patch_cfg.positive_patch_fraction,
         min_positive_pixels=patch_cfg.min_positive_pixels,
