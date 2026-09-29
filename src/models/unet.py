@@ -25,12 +25,21 @@ def build_model(cfg) -> nn.Module:
     if arch not in ARCHITECTURES:
         raise KeyError(f"Unknown arch '{arch}'. Available: {sorted(ARCHITECTURES)}")
 
-    return ARCHITECTURES[arch](
+    kwargs = dict(
         encoder_name=cfg.encoder,
         encoder_weights=cfg.get("encoder_weights"),  # None -> random init
         in_channels=cfg.in_channels,
-        classes=cfg.classes,  # 1 logit per pixel: loss applies the sigmoid
+        classes=cfg.classes,
     )
+
+    # T5: optional scSE attention in the decoder blocks (smp Unet / UnetPlusPlus only).
+    attention = cfg.get("decoder_attention_type")
+    if attention:
+        if arch not in ("unet", "unetplusplus"):
+            raise ValueError(f"decoder_attention_type is not supported by arch '{arch}'.")
+        kwargs["decoder_attention_type"] = str(attention)
+
+    return ARCHITECTURES[arch](**kwargs)
 
 
 def count_parameters(model: nn.Module) -> tuple[int, int]:

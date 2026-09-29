@@ -43,10 +43,10 @@
     "blend_mode": "gaussian"
   },
   "checkpoint": {
-    "path": "/home/sam/Thesis/MS-Thesis/outputs/runs/p1mlB_unetplusplus_r34_512_from_p1b4/best.pt",
+    "path": "/home/sam/Thesis/MS-Thesis/outputs/runs/p1ml_t5_unetplusplus_r34_512_imagenet_t4_with_decoder_attention/best.pt",
     "name": "best.pt",
-    "epoch": 28,
-    "best_monitor_metric": 0.425457668174764
+    "epoch": 18,
+    "best_monitor_metric": 0.5058962266180228
   },
   "n_images": 975,
   "n_images_with_any_damage": 920,

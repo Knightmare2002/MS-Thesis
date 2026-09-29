@@ -22,6 +22,7 @@ outputs/*
 *.jpeg
 
 !outputs/runs/**/curves.png
+!outputs/runs/**/qualitative_overview_multilabel.png
 
 # Cache Python
 __pycache__/
