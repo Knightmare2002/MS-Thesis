@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="split seed (default: project.seed)")
     parser.add_argument("--output-dir", default=None, help="default: <run-dir>/eval_multilabel_postproc")
     parser.add_argument("--from-cache", action="store_true", help=f"reuse {CACHE_NAME}, skip inference")
+    parser.add_argument("--min-object-recall", type=float, default=None, help="optional per-class floor on object recall (all GT components)")
     return parser.parse_args()
 
 
@@ -126,21 +127,27 @@ def run_inference(args, cfg, run_dir: Path, thresholds, area_fractions, cache_pa
     return payload
 
 
-def select_class(counts_c: np.ndarray, thresholds, area_fractions, mode: str, max_far):
-    """counts_c: summed [T, A, F] for one class on the calibration half."""
+def select_class(counts_c: np.ndarray, thresholds, area_fractions, mode: str, max_far, min_object_recall=None):
+    """counts_c: summed [T, A, F] for one class on the calibration half.
+
+    Constraints are relaxed in order (FAR first, then object recall) if no grid point meets them.
+    """
     metrics = metrics_from_counts(counts_c)
     area_indices = [0] if mode == "threshold_only" else range(len(area_fractions))
     candidates = [(t, a) for t in range(len(thresholds)) for a in area_indices]
 
-    feasible = [x for x in candidates
-                if max_far is None or metrics["false_alarm_rate_empty_gt"][x] <= max_far]
-    if feasible:
-        best = max(feasible, key=lambda x: (round(float(metrics["dice"][x]), 6),
-                                            area_fractions[x[1]], thresholds[x[0]]))
-    else:
-        best = min(candidates, key=lambda x: (float(metrics["false_alarm_rate_empty_gt"][x]),
-                                              -float(metrics["dice"][x])))
-    return best, bool(feasible)
+    def admissible(x, use_far, use_obj):
+        far_ok = not use_far or max_far is None or metrics["false_alarm_rate_empty_gt"][x] <= max_far
+        obj_ok = not use_obj or min_object_recall is None or metrics["object_recall"][x] >= min_object_recall
+        return far_ok and obj_ok
+
+    for use_far, use_obj in ((True, True), (False, True), (False, False)):
+        feasible = [x for x in candidates if admissible(x, use_far, use_obj)]
+        if feasible:
+            break
+    best = max(feasible, key=lambda x: (round(float(metrics["dice"][x]), 6),
+                                        area_fractions[x[1]], thresholds[x[0]]))
+    return best, bool(use_far and use_obj)
 
 
 def summarize(per_class_counts: np.ndarray) -> dict:
@@ -192,15 +199,15 @@ def main() -> None:
         for mode in MODES:
             selected = {}
             for c, name in enumerate(UNIFIED_DAMAGE_CLASSES):
-                (t, a), feasible = select_class(calib_sum[c], thresholds, area_fractions, mode, args.max_far)
+                (t, a), feasible = select_class(calib_sum[c], thresholds, area_fractions, mode, args.max_far, args.min_object_recall)
                 selected[name] = {"threshold": thresholds[t], "min_area_fraction": area_fractions[a],
-                                  "far_constraint_met": feasible}
+                                  "constraints_met": feasible}
                 for part, source in (("calib", calib_sum), ("test", test_sum)):
                     m = metrics_from_counts(source[c, t, a])
                     per_class_rows.append({
                         "fold": fold, "mode": mode, "part": part, "class": name,
                         "threshold": thresholds[t], "min_area_fraction": area_fractions[a],
-                        "far_constraint_met": feasible, **{k: float(v) for k, v in m.items()},
+                        "constraints_met": feasible, **{k: float(v) for k, v in m.items()},
                     })
             for part, source in (("calib", calib_sum), ("test", test_sum)):
                 chosen = np.stack([
@@ -232,6 +239,7 @@ def main() -> None:
             "min_area_fraction_grid": area_fractions,
             "selection": "argmax Dice; ties -> larger area, higher threshold",
             "max_far": args.max_far,
+            "min_object_recall": args.min_object_recall,
             "frozen_fold0": frozen,
             "note": NOTE,
         }, fh, indent=2, ensure_ascii=False)
