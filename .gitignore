@@ -26,6 +26,8 @@ outputs/*
 
 #damage3d
 damage3d/damage3d_runs
+damage3d_runs/
+damage3d_maps/
 
 # Cache Python
 __pycache__/

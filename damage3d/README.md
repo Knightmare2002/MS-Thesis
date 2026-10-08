@@ -303,6 +303,14 @@ Requirements on the maps:
 
 Then run with `--probability-source files --probabilities-dir <dir>`.
 
+`scripts/23_infer_probability_maps.py` implements this for a P1ML run. It reuses the sliding-window protocol of step 12, the damage3d camera selection (same flags, same order) and reads the photos with `IMREAD_IGNORE_ORIENTATION`:
+
+```powershell
+python scripts\23_infer_probability_maps.py --run-dir outputs\runs\<p1ml_run> --start-image 76 --end-image 86
+```
+
+Maps go to `<project-root>\damage3d_maps\<run name>\` with a `maps_manifest.json` (checkpoint SHA-256, inference settings, per-map size and timing). Existing maps are skipped; a different setting in the same folder is refused. The script prints the frozen validation thresholds of the run (`eval_multilabel_sliding_calibrated`) as a ready-made `--thresholds` string. Never re-select thresholds on the bridge photos.
+
 ## 13. Known limitations and missing inputs
 
 - The frame of the real PLY/OBJ is still unknown. It is decided at runtime from `marker_reference.txt` and the OBJ, or with `--point-frame`.
