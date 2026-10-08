@@ -78,7 +78,6 @@ def make_frame(name: str, chunk_transform: ChunkTransform) -> SourceFrame:
 
 
 def read_marker_reference(path: Path) -> dict[str, str]:
-    """Same parser as verify_marker_projection.py (key = value lines)."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)

@@ -24,6 +24,9 @@ outputs/*
 !outputs/runs/**/curves.png
 !outputs/runs/**/qualitative_overview_multilabel.png
 
+#damage3d
+damage3d/damage3d_runs
+
 # Cache Python
 __pycache__/
 *.py[cod]

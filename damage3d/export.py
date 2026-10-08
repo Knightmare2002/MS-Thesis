@@ -113,27 +113,28 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
                             + [f"score_{c}" for c in DAMAGE_CLASSES] + [f"views_{c}" for c in DAMAGE_CLASSES]
                             + [f"label_{c}" for c in DAMAGE_CLASSES])
     for shard in sorted(shard_dir.glob("chunk_*.npz")):
-        with np.load(shard) as d:
-            rec = np.zeros(len(d["state"]), dtype=dtype)
-            rec["x"], rec["y"], rec["z"] = d["xyz"][:, 0], d["xyz"][:, 1], d["xyz"][:, 2]
-            rec["red"], rec["green"], rec["blue"] = d["rgb"][:, 0], d["rgb"][:, 1], d["rgb"][:, 2]
-            rec["state"] = d["state"]
-            rec["label_mask"] = d["label_mask"]
-            rec["n_classes"] = np.unpackbits(d["label_mask"][:, None], axis=1).sum(axis=1)
-            rec["n_views"] = d["n_views"]
-            for i, c in enumerate(DAMAGE_CLASSES):
-                rec[f"score_{c}"] = d["score"][:, i]
-                rec[f"views_{c}"] = d["views"][:, i]
-            rec["source_index"] = d["source_index"]
-            writer.write(rec)
-            if csv_writer:
-                labels = (d["label_mask"][:, None] >> np.arange(NUM_CLASSES, dtype=np.uint8)) & 1
-                for k in range(len(rec)):
-                    csv_writer.writerow(
-                        [int(d["source_index"][k]), *(f"{v:.6f}" for v in d["xyz"][k]), int(d["state"][k]),
-                         int(d["label_mask"][k]), int(d["n_views"][k])]
-                        + ["" if np.isnan(s) else f"{s:.6f}" for s in d["score"][k]]
-                        + [int(v) for v in d["views"][k]] + [int(v) for v in labels[k]])
+        with np.load(shard) as z:
+            d = {k: z[k] for k in z.files}
+        rec = np.zeros(len(d["state"]), dtype=dtype)
+        rec["x"], rec["y"], rec["z"] = d["xyz"][:, 0], d["xyz"][:, 1], d["xyz"][:, 2]
+        rec["red"], rec["green"], rec["blue"] = d["rgb"][:, 0], d["rgb"][:, 1], d["rgb"][:, 2]
+        rec["state"] = d["state"]
+        rec["label_mask"] = d["label_mask"]
+        rec["n_classes"] = np.unpackbits(d["label_mask"][:, None], axis=1).sum(axis=1)
+        rec["n_views"] = d["n_views"]
+        for i, c in enumerate(DAMAGE_CLASSES):
+            rec[f"score_{c}"] = d["score"][:, i]
+            rec[f"views_{c}"] = d["views"][:, i]
+        rec["source_index"] = d["source_index"]
+        writer.write(rec)
+        if csv_writer:
+            labels = (d["label_mask"][:, None] >> np.arange(NUM_CLASSES, dtype=np.uint8)) & 1
+            for k in range(len(rec)):
+                csv_writer.writerow(
+                    [int(d["source_index"][k]), *(f"{v:.6f}" for v in d["xyz"][k]), int(d["state"][k]),
+                        int(d["label_mask"][k]), int(d["n_views"][k])]
+                    + ["" if np.isnan(s) else f"{s:.6f}" for s in d["score"][k]]
+                    + [int(v) for v in d["views"][k]] + [int(v) for v in labels[k]])
     writer.close()
     os.replace(ply_tmp, out / "fused_points.ply")
     if csv_file:

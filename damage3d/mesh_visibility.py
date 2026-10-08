@@ -97,6 +97,7 @@ class MeshOcclusion:
         if n == 0:
             return out
         center = np.asarray(camera_center_source, dtype=np.float64)
+        
         for s in range(0, n, self.ray_batch):
             e = min(s + self.ray_batch, n)
             direction = pts[s:e] - center

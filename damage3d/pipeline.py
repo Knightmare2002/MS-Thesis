@@ -292,6 +292,7 @@ def run(cfg: RunConfig) -> dict:
         "layout": {"point_chunk_size": cfg.point_chunk_size, "camera_batch_size": cfg.camera_batch_size},
         "provider": provider.describe(),
     }
+    
     run_path = cfg.output_dir
     if run_path is None:
         tag = selected[0][1].stem if len(selected) == 1 else f"{selected[0][1].stem}-{selected[-1][1].stem}_n{len(selected)}"
