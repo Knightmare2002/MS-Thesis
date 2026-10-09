@@ -42,16 +42,16 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from damage3d.classes import DAMAGE_CLASSES  # noqa: E402
-from damage3d.metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras  # noqa: E402
-from damage3d.paths import resolve_path, resolve_project_root  # noqa: E402
-from damage3d.providers import save_probability_npz  # noqa: E402
-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES  # noqa: E402
-from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD  # noqa: E402
-from src.engine import load_checkpoint  # noqa: E402
-from src.eval.sliding_window import _sliding_positions, predict_sliding_window_multilabel  # noqa: E402
-from src.models.unet import build_model  # noqa: E402
-from src.utils import get_device, load_config  # noqa: E402
+from damage3d.classes import DAMAGE_CLASSES  
+from damage3d.metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras  
+from damage3d.paths import resolve_path, resolve_project_root  
+from damage3d.providers import save_probability_npz  
+from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES  
+from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD  
+from src.engine import load_checkpoint  
+from src.eval.sliding_window import _sliding_positions, predict_sliding_window_multilabel  
+from src.models.unet import build_model 
+from src.utils import get_device, load_config  
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 CALIBRATED_THRESHOLDS = Path("eval_multilabel_sliding_calibrated") / "thresholds_per_class_validation_calibrated.json"

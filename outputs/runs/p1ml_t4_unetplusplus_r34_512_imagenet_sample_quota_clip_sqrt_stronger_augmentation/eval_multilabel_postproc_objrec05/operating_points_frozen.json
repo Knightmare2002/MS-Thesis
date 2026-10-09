@@ -1,7 +1,7 @@
 {
   "pipeline": "joint per-class threshold + min-area calibration (additive)",
   "run_dir": "C:\\Users\\Samuele_Caruso\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t4_unetplusplus_r34_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation",
-  "created_utc": "2026-10-07T00:08:00+00:00",
+  "created_utc": "2026-10-07T00:46:30+00:00",
   "checkpoint": {
     "name": "best.pt",
     "epoch": "21"
@@ -515,6 +515,7 @@
   ],
   "selection": "argmax Dice; ties -> larger area, higher threshold",
   "max_far": null,
+  "min_object_recall": 0.5,
   "frozen_fold0": {
     "threshold_only": {
       "crack": {
@@ -523,7 +524,7 @@
         "far_constraint_met": true
       },
       "spalling": {
-        "threshold": 0.7,
+        "threshold": 0.6,
         "min_area_fraction": 0.0,
         "far_constraint_met": true
       },
@@ -551,17 +552,17 @@
     "threshold_min_area": {
       "crack": {
         "threshold": 0.4,
-        "min_area_fraction": 0.02,
+        "min_area_fraction": 0.005,
         "far_constraint_met": true
       },
       "spalling": {
-        "threshold": 0.7,
-        "min_area_fraction": 0.005,
+        "threshold": 0.6,
+        "min_area_fraction": 0.0,
         "far_constraint_met": true
       },
       "corrosion": {
         "threshold": 0.6,
-        "min_area_fraction": 0.003,
+        "min_area_fraction": 0.001,
         "far_constraint_met": true
       },
       "moisture": {

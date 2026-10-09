@@ -12,14 +12,14 @@ import os
 from pathlib import Path
 
 ENV_PROJECT_ROOT = "DAMAGE3D_PROJECT_ROOT"
-DEFAULT_PROJECT_ROOT = Path(r"C:\\Users\\Samuele_Caruso\\Desktop\\bridge_model")
+DEFAULT_PROJECT_ROOT = Path(r"C:\\Users\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\bridge_model")
 
 DEFAULT_NAMES = {
     "cameras_xml": "cameras.xml",
     "point_cloud": "bridge_3dpc_point_cloud.ply",
     "mesh": "model_medium_quality.obj",
     "marker_reference": "marker_reference.txt",
-    "images_dir": "C:\\Users\\Samuele_Caruso\\Desktop\\150_Lincoln_St_22_09_2026",
+    "images_dir": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\150_Lincoln_St_22_09_2026",
     "runs_dir": "damage3d_runs",
 }
 

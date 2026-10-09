@@ -253,7 +253,7 @@ def main() -> None:
     print(test_view.groupby("mode")[view[2:]].mean().round(4).to_string())
     print("\n--- frozen fold-0 operating points (threshold_min_area) ---")
     for name, point in frozen["threshold_min_area"].items():
-        flag = "" if point["far_constraint_met"] else "  (FAR constraint NOT met)"
+        flag = "" if point["constraints_met"] else "  (FAR constraint NOT met)"
         print(f"{name:>13}: tau = {point['threshold']:.2f} | A = {point['min_area_fraction']:.0e}{flag}")
     print(f"\n[postproc] {NOTE}\n[postproc] artifacts in {output_dir.resolve()}")
 

@@ -62,11 +62,11 @@ data:
 
 model:
   arch: "unetplusplus"
-  encoder: "resnet34"
+  encoder: "efficientnet-b4"
   encoder_weights: "imagenet"   # run A bootstrap; run B overwrites it via transfer
   in_channels: 3
   classes: 6                    # crack, spalling, corrosion, moisture, delamination, surface
-  decoder_attention_type: "scse"
+  decoder_attention_type: null  # null = no attention; "scse" = spatial+channel SE; "se" = channel SE; "cbam" = CBAM
 
 loss:
   # Sigmoid + per-channel BCEWithLogits (vector pos_weight) + per-channel Soft Dice.

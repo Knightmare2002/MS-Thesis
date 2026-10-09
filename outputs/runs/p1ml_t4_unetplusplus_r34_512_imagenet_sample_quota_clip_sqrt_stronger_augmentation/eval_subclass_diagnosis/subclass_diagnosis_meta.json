@@ -1,0 +1,39 @@
+{
+  "run_dir": "C:\\Users\\Samuele_Caruso\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t4_unetplusplus_r34_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation",
+  "created_utc": "2026-10-07T18:24:36+00:00",
+  "checkpoint": {
+    "name": "best.pt",
+    "epoch": "21"
+  },
+  "split": "validation",
+  "subset": "all",
+  "n_images": 975,
+  "operating_points_file": "C:\\Users\\Samuele_Caruso\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t4_unetplusplus_r34_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation\\eval_multilabel_postproc_objrec05\\operating_points_frozen.json",
+  "mode": "threshold_min_area",
+  "thresholds": {
+    "crack": 0.4,
+    "spalling": 0.6,
+    "corrosion": 0.6,
+    "moisture": 0.5,
+    "delamination": 0.6,
+    "surface": 0.5
+  },
+  "min_area_fractions": {
+    "crack": 0.005,
+    "spalling": 0.0,
+    "corrosion": 0.001,
+    "moisture": 0.02,
+    "delamination": 0.01,
+    "surface": 0.02
+  },
+  "labels": {
+    "Wetspot": 3,
+    "Efflorescence": 3,
+    "Rockpocket": 1,
+    "Cavity": 1,
+    "Spalling": 1,
+    "Graffiti": 5,
+    "Weathering": 5,
+    "Restformwork": 5
+  }
+}

@@ -1,7 +1,7 @@
 {
   "pipeline": "joint per-class threshold + min-area calibration (additive)",
-  "run_dir": "C:\\Users\\Samuele_Caruso\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t4_unetplusplus_r34_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation",
-  "created_utc": "2026-10-07T00:08:00+00:00",
+  "run_dir": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t9_unetplusplus_effb4_512_imagenet_sample_quota_clip_sqrt_stronger_augmentation",
+  "created_utc": "2026-10-08T18:39:43+00:00",
   "checkpoint": {
     "name": "best.pt",
     "epoch": "21"
@@ -498,86 +498,91 @@
     "dacl10k_v2_validation_0972.jpg"
   ],
   "thresholds_grid": [
+    0.1,
+    0.2,
     0.3,
     0.4,
     0.5,
     0.6,
-    0.7
+    0.7,
+    0.8,
+    0.9
   ],
   "min_area_fraction_grid": [
     0.0,
+    1e-05,
+    3e-05,
+    0.0001,
     0.0003,
     0.001,
-    0.003,
-    0.005,
-    0.01,
-    0.02
+    0.003
   ],
   "selection": "argmax Dice; ties -> larger area, higher threshold",
   "max_far": null,
+  "min_object_recall": null,
   "frozen_fold0": {
     "threshold_only": {
       "crack": {
-        "threshold": 0.5,
+        "threshold": 0.7,
         "min_area_fraction": 0.0,
-        "far_constraint_met": true
+        "constraints_met": true
       },
       "spalling": {
         "threshold": 0.7,
         "min_area_fraction": 0.0,
-        "far_constraint_met": true
+        "constraints_met": true
       },
       "corrosion": {
-        "threshold": 0.6,
-        "min_area_fraction": 0.0,
-        "far_constraint_met": true
-      },
-      "moisture": {
         "threshold": 0.5,
         "min_area_fraction": 0.0,
-        "far_constraint_met": true
+        "constraints_met": true
+      },
+      "moisture": {
+        "threshold": 0.6,
+        "min_area_fraction": 0.0,
+        "constraints_met": true
       },
       "delamination": {
         "threshold": 0.6,
         "min_area_fraction": 0.0,
-        "far_constraint_met": true
+        "constraints_met": true
       },
       "surface": {
-        "threshold": 0.5,
+        "threshold": 0.6,
         "min_area_fraction": 0.0,
-        "far_constraint_met": true
+        "constraints_met": true
       }
     },
     "threshold_min_area": {
       "crack": {
-        "threshold": 0.4,
-        "min_area_fraction": 0.02,
-        "far_constraint_met": true
+        "threshold": 0.7,
+        "min_area_fraction": 0.001,
+        "constraints_met": true
       },
       "spalling": {
         "threshold": 0.7,
-        "min_area_fraction": 0.005,
-        "far_constraint_met": true
+        "min_area_fraction": 0.001,
+        "constraints_met": true
       },
       "corrosion": {
-        "threshold": 0.6,
+        "threshold": 0.4,
         "min_area_fraction": 0.003,
-        "far_constraint_met": true
+        "constraints_met": true
       },
       "moisture": {
-        "threshold": 0.5,
-        "min_area_fraction": 0.02,
-        "far_constraint_met": true
+        "threshold": 0.6,
+        "min_area_fraction": 0.003,
+        "constraints_met": true
       },
       "delamination": {
         "threshold": 0.6,
-        "min_area_fraction": 0.01,
-        "far_constraint_met": true
+        "min_area_fraction": 0.003,
+        "constraints_met": true
       },
       "surface": {
-        "threshold": 0.5,
-        "min_area_fraction": 0.02,
-        "far_constraint_met": true
+        "threshold": 0.6,
+        "min_area_fraction": 0.003,
+        "constraints_met": true
       }
     }
   },
