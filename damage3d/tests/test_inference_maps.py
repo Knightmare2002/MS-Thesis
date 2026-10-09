@@ -89,6 +89,13 @@ def test_inference_maps_feed_damage3d(project_id, tmp_path):
     with pytest.raises(SystemExit, match="different settings"):
         script.main([*common, "--downsample", "4"])
 
+    # Overlays for maps that already exist: rendered from the stored maps, maps untouched.
+    assert script.main([*common, "--downsample", "2", "--save-overlays", "--overlay-width", "320"]) == 0
+    assert (maps / "DSC01020.npz").stat().st_mtime_ns == mtime
+    for stem in CAMERAS:
+        overlay = cv2.imread(str(maps / "overlays" / f"{stem}_overlay.jpg"))
+        assert overlay is not None and overlay.shape[1] == 4 * 320
+
     out = tmp_path / "fused"
     assert damage3d_main(["--project-root", str(project_id["root"]), "--output-dir", str(out),
                           "--probability-source", "files", "--probabilities-dir", str(maps),
@@ -105,3 +112,25 @@ def test_inference_maps_feed_damage3d(project_id, tmp_path):
     assert seen.any() and (d["n_views"] >= 2).any()
     assert (d["label_mask"][seen] == 2).all()          # spalling only, no other class
     assert (d["state"][seen] == STATE_DAMAGE).all()
+
+
+def test_render_overlay_marks_only_positive_classes():
+    script = _load_script()
+    image = np.full((60, 80, 3), 128, np.uint8)
+    probs = np.zeros((6, 30, 40), np.float32)
+    probs[1] = 0.9                       # spalling everywhere
+    probs[4, :, :20] = 0.9               # delamination on the left half (overlaps spalling)
+    thresholds = np.full(6, 0.5, np.float32)
+    grid, boxes = script.render_overlay(image, probs, thresholds, "t", panel_width=80, alpha=0.5)
+
+    def panel(name):
+        y, x, h, w = boxes[name]
+        return grid[y:y + h, x:x + w].astype(int)
+
+    photo = panel("photo")
+    assert np.array_equal(panel("crack"), photo)          # no crack -> untouched photo
+    assert (panel("spalling") != photo).any(axis=2).all()  # spalling tinted everywhere
+    delam = panel("delamination")
+    assert (delam[:, :35] != photo[:, :35]).any(axis=2).all() and np.array_equal(delam[:, 45:], photo[:, 45:])
+    both = panel("all")
+    assert not np.array_equal(both[:, :35], both[:, 45:])  # overlap gets a different (mean) color

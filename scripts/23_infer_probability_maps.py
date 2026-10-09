@@ -7,6 +7,12 @@ sliding-window protocol as 12_evaluate_dacl10k_multilabel_sliding.py
 writes one ``<stem>.npz`` per photo in the format read by the damage3d
 ``files`` provider (keys ``probs`` (6, H', W') and ``classes``).
 
+With ``--save-overlays`` it also writes ``<maps dir>/overlays/<stem>_overlay.jpg``
+for visual inspection: the photo, all classes together, and one panel per
+class thresholded with the frozen validation thresholds. Overlays are rendered
+from the STORED map (the exact input of damage3d), so they can also be
+produced later for maps that already exist, without re-running the model.
+
 Camera selection reuses damage3d (same XML, same ordering, same flags), so the
 same ``--camera`` / ``--start-image`` / ``--end-image`` arguments select the
 same photos in both steps. Pixels are read in the raw sensor frame (EXIF
@@ -42,10 +48,11 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from damage3d.classes import DAMAGE_CLASSES  
+from damage3d.classes import CLASS_COLORS, DAMAGE_CLASSES  
+from damage3d.fusion import parse_thresholds  
 from damage3d.metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras  
 from damage3d.paths import resolve_path, resolve_project_root  
-from damage3d.providers import save_probability_npz  
+from damage3d.providers import FileProvider, save_probability_npz  
 from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES  
 from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD  
 from src.engine import load_checkpoint  
@@ -79,6 +86,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="store maps at 1/N resolution (area average); 1 = full resolution")
     g.add_argument("--dtype", choices=("float16", "uint8"), default="float16")
     g.add_argument("--overwrite", action="store_true", help="recompute maps that already exist")
+    g = p.add_argument_group("visual inspection")
+    g.add_argument("--save-overlays", action="store_true",
+                   help="write overlays/<stem>_overlay.jpg (also for maps that already exist)")
+    g.add_argument("--overlay-thresholds",
+                   help="'0.5' or 'crack=0.7,...'; default: frozen validation thresholds of the run")
+    g.add_argument("--overlay-width", type=int, default=1200, help="width of each panel in pixels")
+    g.add_argument("--overlay-alpha", type=float, default=0.5, help="opacity of the class colors")
     g.add_argument("--dry-run", action="store_true", help="check inputs and print the plan; write nothing")
     return p.parse_args(argv)
 
@@ -109,6 +123,14 @@ def read_raw_rgb(path: Path) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
+def read_checked(path: Path, calib) -> np.ndarray:
+    image = read_raw_rgb(path)
+    if (image.shape[1], image.shape[0]) != (calib.width, calib.height):
+        raise SystemExit(f"{path.name}: size {image.shape[1]}x{image.shape[0]} "
+                         f"!= calibration {calib.width}x{calib.height}.")
+    return image
+
+
 def downsample(probs: torch.Tensor, factor: int) -> np.ndarray:
     """Area-average a (C, H, W) map to round(H/f) x round(W/f)."""
     if factor == 1:
@@ -116,6 +138,78 @@ def downsample(probs: torch.Tensor, factor: int) -> np.ndarray:
     _, h, w = probs.shape
     size = (max(1, round(h / factor)), max(1, round(w / factor)))
     return F.interpolate(probs[None], size=size, mode="area")[0].numpy()
+
+
+def render_overlay(image_rgb: np.ndarray, probs: np.ndarray, thresholds: np.ndarray, title: str,
+                   panel_width: int = 1200, alpha: float = 0.5) -> tuple[np.ndarray, dict]:
+    """Return a BGR grid [photo | all classes | one panel per class] and the panel boxes.
+
+    ``probs`` is the (C, h, w) stored map (any resolution with the photo aspect
+    ratio); it is resized to the panel size with bilinear interpolation and
+    thresholded per class. Classes are independent: in the "all classes"
+    panel a pixel with several labels gets the mean of their colors and every
+    class keeps its own outline, so overlaps stay visible.
+    """
+    h, w = image_rgb.shape[:2]
+    pw = int(panel_width)
+    ph = max(1, round(h * pw / w))
+    base = cv2.resize(image_rgb, (pw, ph), interpolation=cv2.INTER_AREA).astype(np.float32)
+    p = np.stack([cv2.resize(np.nan_to_num(c, nan=0.0).astype(np.float32), (pw, ph),
+                             interpolation=cv2.INTER_LINEAR) for c in probs])
+    labels = p >= thresholds[:, None, None]
+    colors = np.array([CLASS_COLORS[c] for c in DAMAGE_CLASSES], dtype=np.float32)
+
+    def blend(mask: np.ndarray, color: np.ndarray) -> np.ndarray:
+        """Alpha-blend ``color`` (RGB triple or per-pixel (ph, pw, 3)) where ``mask`` is True."""
+        out = base.copy()
+        tint = color[mask] if color.ndim == 3 else color
+        out[mask] = (1.0 - alpha) * out[mask] + alpha * tint
+        return out
+
+    def outline(panel: np.ndarray, mask: np.ndarray, color) -> np.ndarray:
+        """Draw the mask boundary in the full class color (readable on similar backgrounds)."""
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(panel, contours, -1, tuple(float(v) for v in color), 1, cv2.LINE_AA)
+        return panel
+
+    n_labels = labels.sum(0)
+    any_label = n_labels > 0
+    mean_color = np.tensordot(labels.transpose(1, 2, 0).astype(np.float32), colors, axes=1)
+    mean_color /= np.maximum(n_labels, 1)[..., None]
+    combined = blend(any_label, mean_color)
+    for c in range(len(DAMAGE_CLASSES)):
+        outline(combined, labels[c], colors[c])
+    panels = [(base, "photo (raw sensor frame)"),
+              (combined, f"all classes  {100 * any_label.mean():.2f}% px")]
+    for c, name in enumerate(DAMAGE_CLASSES):
+        panels.append((outline(blend(labels[c], colors[c]), labels[c], colors[c]),
+                       f"{name}  thr {thresholds[c]:.2f}  {100 * labels[c].mean():.2f}% px"))
+
+    bar = 34
+    cols, rows = 4, 2
+    grid = np.full((bar + rows * (ph + bar), cols * pw, 3), 255, dtype=np.uint8)
+    cv2.putText(grid, title, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA)
+    boxes = {}
+    for k, (panel, text) in enumerate(panels):
+        r, c = divmod(k, cols)
+        y0, x0 = bar + r * (ph + bar) + bar, c * pw
+        grid[y0:y0 + ph, x0:x0 + pw] = cv2.cvtColor(np.clip(panel, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        if k >= 2:
+            sw = colors[k - 2][::-1].tolist()
+            cv2.rectangle(grid, (x0 + 6, y0 - 26), (x0 + 24, y0 - 8), sw, -1)
+        cv2.putText(grid, text, (x0 + (30 if k >= 2 else 8), y0 - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 0, 0), 1, cv2.LINE_AA)
+        boxes["photo" if k == 0 else "all" if k == 1 else DAMAGE_CLASSES[k - 2]] = (y0, x0, ph, pw)
+    return grid, boxes
+
+
+def write_jpeg(path: Path, image_bgr: np.ndarray, quality: int = 90) -> None:
+    ok, buf = cv2.imencode(".jpg", image_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise RuntimeError(f"JPEG encoding failed for {path}")
+    tmp = path.with_name(path.stem + ".tmp.jpg")
+    buf.tofile(str(tmp))  # works with non-ASCII Windows paths
+    os.replace(tmp, path)
 
 
 def frozen_thresholds(run_dir: Path) -> tuple[str | None, Path]:
@@ -174,6 +268,15 @@ def main(argv=None) -> int:
     print(f"Sliding window: patch {patch.patch_size}, stride {stride}, batch {batch_size}, blend {patch.blend_mode} "
           f"| photo {calib0.width}x{calib0.height} -> {n_patches} patches per photo")
     print(f"Frozen validation thresholds: {thr_string or f'not found ({thr_path})'}")
+    overlay_thr = None
+    if args.save_overlays:
+        source = args.overlay_thresholds or thr_string
+        if source is None:
+            raise SystemExit(f"--save-overlays needs thresholds: {thr_path} not found, "
+                             f"pass --overlay-thresholds explicitly.")
+        overlay_thr = parse_thresholds(source)
+        print(f"Overlays -> {out_dir / 'overlays'} (thresholds "
+              f"{', '.join(f'{c}={t:.2f}' for c, t in zip(DAMAGE_CLASSES, overlay_thr))})")
     if args.dry_run:
         return 0
 
@@ -197,6 +300,18 @@ def main(argv=None) -> int:
         if previous.get("settings") == settings:
             manifest["maps"] = previous.get("maps", {})
 
+    overlay_dir = out_dir / "overlays"
+    if args.save_overlays:
+        overlay_dir.mkdir(exist_ok=True)
+    stored_maps = FileProvider(out_dir)
+
+    def save_overlay(cam, image: np.ndarray, calib) -> None:
+        pmap = stored_maps.get(cam.stem, calib.width, calib.height)  # same reader and checks as damage3d
+        grid, _ = render_overlay(image, pmap.probs, overlay_thr,
+                                 title=f"{cam.label} | {run_dir.name} | map {pmap.probs.shape[2]}x{pmap.probs.shape[1]}",
+                                 panel_width=args.overlay_width, alpha=args.overlay_alpha)
+        write_jpeg(overlay_dir / f"{cam.stem}_overlay.jpg", grid)
+
     device = get_device()
     model_cfg = dict(cfg["model"])
     model_cfg["encoder_weights"] = None  # weights come from the checkpoint; avoid any download
@@ -207,14 +322,15 @@ def main(argv=None) -> int:
 
     for i, (position, cam) in enumerate(selected, 1):
         target = out_dir / f"{cam.stem}.npz"
-        if target.is_file() and cam.stem in manifest["maps"] and not args.overwrite:
-            print(f"[{i}/{len(selected)}] {cam.stem}: exists, skipped")
-            continue
         calib = project.calibration_for(cam)
-        image = read_raw_rgb(found[cam.stem])
-        if (image.shape[1], image.shape[0]) != (calib.width, calib.height):
-            raise SystemExit(f"{found[cam.stem].name}: size {image.shape[1]}x{image.shape[0]} "
-                             f"!= calibration {calib.width}x{calib.height}.")
+        if target.is_file() and cam.stem in manifest["maps"] and not args.overwrite:
+            if args.save_overlays:
+                save_overlay(cam, read_checked(found[cam.stem], calib), calib)
+                print(f"[{i}/{len(selected)}] {cam.stem}: map exists, overlay written")
+            else:
+                print(f"[{i}/{len(selected)}] {cam.stem}: exists, skipped")
+            continue
+        image = read_checked(found[cam.stem], calib)
         t0 = time.perf_counter()
         probs = predict_sliding_window_multilabel(
             model=model, image=image, device=device, patch_size=int(patch.patch_size),
@@ -236,9 +352,14 @@ def main(argv=None) -> int:
         tmp_manifest = manifest_path.with_suffix(".json.tmp")
         tmp_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         os.replace(tmp_manifest, manifest_path)
-        print(f"[{i}/{len(selected)}] {cam.stem}: {stored.shape[2]}x{stored.shape[1]} map in {seconds:.1f} s")
+        if args.save_overlays:
+            save_overlay(cam, image, calib)
+        print(f"[{i}/{len(selected)}] {cam.stem}: {stored.shape[2]}x{stored.shape[1]} map in {seconds:.1f} s"
+              f"{' + overlay' if args.save_overlays else ''}")
 
     print(f"\nMaps folder: {out_dir}")
+    if args.save_overlays:
+        print(f"Overlays folder: {overlay_dir}")
     if thr_string:
         print(f'damage3d thresholds (frozen, from {thr_path.name}): --thresholds "{thr_string}"')
     return 0
