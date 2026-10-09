@@ -86,6 +86,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="store maps at 1/N resolution (area average); 1 = full resolution")
     g.add_argument("--dtype", choices=("float16", "uint8"), default="float16")
     g.add_argument("--overwrite", action="store_true", help="recompute maps that already exist")
+    g.add_argument("--dry-run", action="store_true", help="check inputs and print the plan; write nothing")
     g = p.add_argument_group("visual inspection")
     g.add_argument("--save-overlays", action="store_true",
                    help="write overlays/<stem>_overlay.jpg (also for maps that already exist)")
@@ -93,7 +94,6 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="'0.5' or 'crack=0.7,...'; default: frozen validation thresholds of the run")
     g.add_argument("--overlay-width", type=int, default=1200, help="width of each panel in pixels")
     g.add_argument("--overlay-alpha", type=float, default=0.5, help="opacity of the class colors")
-    g.add_argument("--dry-run", action="store_true", help="check inputs and print the plan; write nothing")
     return p.parse_args(argv)
 
 
