@@ -311,6 +311,8 @@ python scripts\23_infer_probability_maps.py --run-dir outputs\runs\<p1ml_run> --
 
 Maps go to `<project-root>\damage3d_maps\<run name>\` with a `maps_manifest.json` (checkpoint SHA-256, inference settings, per-map size and timing). Existing maps are skipped; a different setting in the same folder is refused. The script prints the frozen validation thresholds of the run (`eval_multilabel_sliding_calibrated`) as a ready-made `--thresholds` string. Never re-select thresholds on the bridge photos.
 
+Add `--save-overlays` to also write `<maps dir>\overlays\<stem>_overlay.jpg` for visual inspection: the photo, all classes together (mean color where labels overlap, one outline per class) and one panel per class with its threshold and positive-pixel fraction. Overlays are rendered from the stored map, i.e. the exact input of damage3d, using the frozen thresholds (or `--overlay-thresholds`). For maps that already exist only the overlay is written; the model is not re-run on them. Panels are in the raw sensor frame, like the maps.
+
 ## 13. Known limitations and missing inputs
 
 - The frame of the real PLY/OBJ is still unknown. It is decided at runtime from `marker_reference.txt` and the OBJ, or with `--point-frame`.
