@@ -1,5 +1,5 @@
 #config
-configs/run_paths.ps1
+*.ps1
 
 # Virtual environments
 venv/
@@ -26,6 +26,8 @@ outputs/*
 
 !outputs/runs/**/curves.png
 !outputs/runs/**/qualitative_overview_multilabel.png
+!outputs/runs/**/pr_curves.png
+!outputs/runs/**/confusion_matrix*
 
 #damage3d
 damage3d/damage3d_runs
