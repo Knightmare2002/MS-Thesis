@@ -1,0 +1,20 @@
+{
+  "experiment_type": "standard_target_training",
+  "source_name": null,
+  "source_dataset": null,
+  "target_dataset": "DACL10K_multilabel_damage",
+  "direction": null,
+  "initialization": "model_factory_encoder_weights",
+  "optimizer_reinitialized": true,
+  "scheduler_reinitialized": true,
+  "amp_scaler_reinitialized": true,
+  "transfer_config": {
+    "init_checkpoint": null,
+    "source_name": "P1-B4 DACL10K binary crack U-Net++/ResNet-34 best checkpoint",
+    "source_dataset": "DACL10K_crack_binary",
+    "target_dataset": "DACL10K_multilabel_damage",
+    "load_mode": "partial_encoder_decoder",
+    "reset_optimizer": true
+  },
+  "checkpoint_load": null
+}

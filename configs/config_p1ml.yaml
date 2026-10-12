@@ -62,7 +62,7 @@ data:
 
 model:
   arch: "unetplusplus"
-  encoder: "efficientnet-b4"
+  encoder: "resnet50"
   encoder_weights: "imagenet"   # run A bootstrap; run B overwrites it via transfer
   in_channels: 3
   classes: 6                    # crack, spalling, corrosion, moisture, delamination, surface
