@@ -89,13 +89,8 @@ def save_transfer_metadata(
                 f"Required fields: {', '.join(missing)}"
             )
 
-        if source_dataset == target_dataset:
-            raise ValueError(
-                "[transfer] source_dataset and target_dataset must differ "
-                f"for sequential transfer; both are '{source_dataset}'."
-            )
-
-        direction = f"{source_dataset}_to_{target_dataset}"
+        same_dataset = source_dataset == target_dataset   # T11: fine-tuning on the same task
+        direction = None if same_dataset else f"{source_dataset}_to_{target_dataset}"
         initialization = "external_checkpoint_model_weights_only"
 
     else:
@@ -104,9 +99,7 @@ def save_transfer_metadata(
 
     record = {
         "experiment_type": (
-            "sequential_transfer"
-            if is_transfer
-            else "standard_target_training"
+            ("same_task_fine_tuning" if same_dataset else "sequential_transfer")
         ),
         "source_name": (
             transfer_cfg.get("source_name")

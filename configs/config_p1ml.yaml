@@ -87,7 +87,7 @@ train:
   warmup_epochs: 2
   warmup_start_factor: 0.1
   scheduler:
-    t_0: 30
+    t_0: 10
     t_mult: 1
     eta_min: 0.000005
   # Checkpoint selection and early stopping: macro Dice over the classes present in the monitor split. Not pixel accuracy (trivially high), not crack-only.

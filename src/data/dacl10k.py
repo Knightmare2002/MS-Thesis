@@ -767,6 +767,9 @@ class Dacl10kMultilabelPatchDataset(Dataset):
         patches_per_image: int = 4,
         class_balanced: bool = False,
         class_sampling_power: float = 0.5,
+        hard_negative_pool_path: str | Path | None = None,
+        hard_negative_fraction: float = 0.0,
+        hard_negative_jitter: int = 64,
     ) -> None:
         if patch_size <= 0:
             raise ValueError("patch_size must be positive.")
@@ -817,6 +820,15 @@ class Dacl10kMultilabelPatchDataset(Dataset):
         self.n_positive_patches = round(self.n_patches * self.positive_patch_fraction)
         self.n_negative_patches = self.n_patches - self.n_positive_patches
 
+        # T11: per-channel hard negatives
+        self.hard_negative_jitter = int(hard_negative_jitter)
+        self.hard_negative_pool = self._load_hard_negative_pool(hard_negative_pool_path)
+        self.n_hard_negative_patches = round(self.n_patches * float(hard_negative_fraction))
+        if self.n_hard_negative_patches > 0 and not self.hard_negative_pool:
+            raise RuntimeError("hard_negative_fraction > 0 but the hard-negative pool is empty or missing.")
+        self.n_negative_patches -= self.n_hard_negative_patches
+        self.hard_negative_channels = sorted(self.hard_negative_pool)
+
         self.class_balanced = bool(class_balanced)
         self.class_sampling_probs = None
         if self.class_balanced:
@@ -835,6 +847,7 @@ class Dacl10kMultilabelPatchDataset(Dataset):
         print(
             "[patch-dataset] multilabel composition | "
             f"total={self.n_patches} | positive={self.n_positive_patches} | "
+            f"hard_negative={self.n_hard_negative_patches} | "
             f"negative={self.n_negative_patches} | "
             f"positive source images={len(self.positive_sample_indices)} | "
             f"damage-free images={len(self.negative_sample_indices)}"
@@ -863,6 +876,39 @@ class Dacl10kMultilabelPatchDataset(Dataset):
 
     def __len__(self) -> int:
         return self.n_patches
+    
+    def _load_hard_negative_pool(self, path):
+        """Pool JSON (scripts/26) -> {channel: [(sample_index, top, left), ...]}."""
+        if path is None:
+            return {}
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"hard-negative pool not found: {path.resolve()}")
+        with open(path, encoding="utf-8") as fh:
+            items = json.load(fh)["items"]
+        name_to_index = {Path(p).name: i for i, (p, _) in enumerate(self.samples)}
+        pool, n_missing = {}, 0
+        for item in items:
+            index = name_to_index.get(item["image"])
+            if index is None:
+                n_missing += 1
+                continue
+            pool.setdefault(item["channel"], []).append((index, int(item["top"]), int(item["left"])))
+        if n_missing:
+            print(f"[patch-dataset] hard-negative pool: {n_missing} items not in this split, ignored")
+        return pool
+
+    def _hard_negative_patch(self):
+        """Uniform over target channels, then over that channel's windows, with jitter."""
+        channel = self.hard_negative_channels[np.random.randint(len(self.hard_negative_channels))]
+        entries = self.hard_negative_pool[channel]
+        sample_index, top, left = entries[np.random.randint(len(entries))]
+        image, mask = self._load_sample(sample_index)
+        height, width = image.shape[:2]
+        j = self.hard_negative_jitter
+        top = int(np.clip(top + np.random.randint(-j, j + 1), 0, height - self.patch_size))
+        left = int(np.clip(left + np.random.randint(-j, j + 1), 0, width - self.patch_size))
+        return _crop_at(image, mask, top, left, self.patch_size)
 
     def _load_sample(self, sample_index: int) -> tuple[np.ndarray, np.ndarray]:
         image_path, annotation_path = self.samples[sample_index]
@@ -946,6 +992,10 @@ class Dacl10kMultilabelPatchDataset(Dataset):
                 sample_index = int(np.random.choice(self.positive_sample_indices))
             image, mask = self._load_sample(sample_index)
             image_patch, mask_patch = self._positive_crop(image, mask, anchor_channel=channel)
+
+        elif index < self.n_positive_patches + self.n_hard_negative_patches:
+            image_patch, mask_patch = self._hard_negative_patch()
+            
         else:
             sample_index = int(np.random.choice(self.negative_source_indices))
             image, mask = self._load_sample(sample_index)

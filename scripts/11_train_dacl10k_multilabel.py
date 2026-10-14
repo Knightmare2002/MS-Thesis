@@ -289,6 +289,9 @@ def main() -> None:
         patches_per_image=patch_cfg.patches_per_image,
         class_balanced=bool(patch_cfg.get("class_balanced", False)),
         class_sampling_power=float(patch_cfg.get("class_sampling_power", 0.5)),
+        hard_negative_pool_path=patch_cfg.get("hard_negative_pool", None),
+        hard_negative_fraction=float(patch_cfg.get("hard_negative_fraction", 0.0)),
+        hard_negative_jitter=int(patch_cfg.get("hard_negative_jitter", 64)),
     )
     val_ds = Dacl10kMultilabelCenterPatchDataset(
         samples=val_samples,
@@ -337,7 +340,13 @@ def main() -> None:
             "max_crop_attempts": int(patch_cfg.max_crop_attempts),
             "positive_criterion": "union of the 6 damage channels",
         },
-        "hard_negative_mining": {"enabled": False},
+        "hard_negative_mining": {
+            "enabled": train_ds.n_hard_negative_patches > 0,
+            "pool": patch_cfg.get("hard_negative_pool", None),
+            "fraction": float(patch_cfg.get("hard_negative_fraction", 0.0)),
+            "n_patches_per_epoch": int(train_ds.n_hard_negative_patches),
+            "pool_items_per_channel": {c: len(v) for c, v in train_ds.hard_negative_pool.items()},
+        },
         "class_weights": {
             "pos_weight": class_weights["pos_weight"],
             "pos_weight_raw": class_weights["pos_weight_raw"],
