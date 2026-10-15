@@ -1,0 +1,45 @@
+{
+  "experiment_type": "same_task_fine_tuning",
+  "source_name": "T9_best",
+  "source_dataset": "DACL10K_multilabel_damage",
+  "target_dataset": "DACL10K_multilabel_damage",
+  "direction": null,
+  "initialization": "external_checkpoint_model_weights_only",
+  "optimizer_reinitialized": true,
+  "scheduler_reinitialized": true,
+  "amp_scaler_reinitialized": true,
+  "transfer_config": {
+    "init_checkpoint": "outputs/runs/p1ml_t9_unetplusplus_effb4_512_imagenet/best.pt",
+    "source_name": "T9_best",
+    "source_dataset": "DACL10K_multilabel_damage",
+    "target_dataset": "DACL10K_multilabel_damage",
+    "load_mode": "partial_encoder_decoder",
+    "reset_optimizer": true
+  },
+  "checkpoint_load": {
+    "mode": "partial_encoder_decoder_head_reinit",
+    "checkpoint_path": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t9_unetplusplus_effb4_512_imagenet\\best.pt",
+    "checkpoint_epoch": 21,
+    "checkpoint_best_metric": 0.5396906668071206,
+    "n_source_tensors": 838,
+    "n_target_tensors": 838,
+    "n_transferred_tensors": 838,
+    "reinitialized_head_tensors": [],
+    "head_shape_changes": [],
+    "skipped_absent_in_target": [],
+    "allowed_missing_prefixes": [
+      "segmentation_head."
+    ],
+    "required_prefixes": [
+      "encoder.",
+      "decoder."
+    ],
+    "factory_model_sha256": "bfd74defb30420f4349f98df03d4f954141ea2040e1950de6313f04a11a815da",
+    "initialized_model_sha256": "45b4738709c1a55a5880427564c67e833b1d82cc5d8c498269c74da7a06ac5a2",
+    "restored_optimizer_state": false,
+    "restored_scheduler_state": false,
+    "restored_scaler_state": false,
+    "restored_epoch": false,
+    "restored_early_stopping_state": false
+  }
+}
