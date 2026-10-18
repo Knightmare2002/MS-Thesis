@@ -69,6 +69,7 @@ def save_transfer_metadata(
     target_dataset = transfer_cfg.get("target_dataset")
 
     is_transfer = bool(init_checkpoint)
+    same_dataset = False
 
     if is_transfer:
         required_fields = {

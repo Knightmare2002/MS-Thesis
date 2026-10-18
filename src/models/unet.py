@@ -21,6 +21,11 @@ ARCHITECTURES = {
 
 def build_model(cfg) -> nn.Module:
     """Instantiate a segmentation model from the `model` section of the config."""
+    # T12: fully pretrained checkpoint from smp-hub (e.g. UPerNet-ConvNeXt on ADE20K);
+    # only the segmentation head is re-initialised to cfg.classes channels.
+    hub = cfg.get("hub_checkpoint")
+    if hub:
+        return smp.from_pretrained(str(hub), classes=int(cfg.classes), strict=False)
     arch = str(cfg.arch).lower()
     if arch not in ARCHITECTURES:
         raise KeyError(f"Unknown arch '{arch}'. Available: {sorted(ARCHITECTURES)}")
