@@ -28,6 +28,7 @@ outputs/*
 !outputs/runs/**/qualitative_overview_multilabel.png
 !outputs/runs/**/pr_curves.png
 !outputs/runs/**/confusion_matrix*
+!outputs/runs/**/reliability_platt.png
 !outputs/compare*
 
 #damage3d

@@ -1,0 +1,464 @@
+diff --git a/damage3d/cli.py b/damage3d/cli.py
+index 81a2a5d..3453930 100644
+--- a/damage3d/cli.py
++++ b/damage3d/cli.py
+@@ -27,8 +27,15 @@ def build_parser() -> argparse.ArgumentParser:
+     g.add_argument("--output-dir", help="run directory; default <project-root>/damage3d_runs/<auto name>")
+ 
+     g = p.add_argument_group("probabilities")
+-    g.add_argument("--probability-source", choices=("synthetic", "files"), default="synthetic")
++    g.add_argument("--probability-source", choices=("synthetic", "files", "ensemble"), default="synthetic")
+     g.add_argument("--probabilities-dir", help="folder with <stem>.npz maps (files provider)")
++    g.add_argument("--calibration",
++                   help="files source: scripts/27 probability_calibration.json of the model that wrote the maps; "
++                        "applies its per-class Platt map and, unless --thresholds is given, its thresholds_calibrated")
++    g.add_argument("--ensemble",
++                   help="ensemble source: scripts/28 ensemble.json (members, weights, Platt maps, thresholds)")
++    g.add_argument("--member-maps", action="append", default=[], metavar="NAME=DIR",
++                   help="maps folder of an ensemble member (repeatable); default <project-root>/damage3d_maps/<run name>")
+     g.add_argument("--synthetic-pattern", choices=("regions", "mask"), default="regions",
+                    help="'regions': six overlapping Gaussian bumps; 'mask': prototype PNG mask")
+     g.add_argument("--synthetic-downsample", type=int, default=8, help="resolution divisor of synthetic maps")
+@@ -62,8 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
+ 
+     g = p.add_argument_group("fusion and export (can change on --resume: outputs are re-exported)")
+     g.add_argument("--vote-threshold", type=float, default=0.5, help="per-view threshold for the votes counters")
+-    g.add_argument("--thresholds", default="0.5",
+-                   help="'0.5' or 'crack=0.5,spalling=0.5,...'; synthetic runs: declared TEST thresholds")
++    g.add_argument("--thresholds", default=None,
++                   help="'0.5' or 'crack=0.5,spalling=0.5,...' (overrides the JSON thresholds); default: "
++                        "frozen thresholds of --calibration/--ensemble, else 0.5. Synthetic runs: TEST thresholds")
+     g.add_argument("--min-views", type=int, default=1)
+     g.add_argument("--export-scope", choices=("all", "observed", "damage"), default="all")
+     g.add_argument("--csv-max-points", type=int, default=200_000)
+@@ -76,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
+     return p
+ 
+ 
++def _parse_member_maps(root, items: list[str]) -> dict:
++    out = {}
++    for item in items:
++        if "=" not in item:
++            raise SystemExit(f"--member-maps expects NAME=DIR, got '{item}'.")
++        name, path = item.split("=", 1)
++        out[name.strip()] = resolve_path(root, path.strip(), None)
++    return out
++
++
+ def config_from_args(args: argparse.Namespace) -> RunConfig:
+     root = resolve_project_root(args.project_root)
+     occlusion_mesh = args.occlusion == "mesh"
+@@ -90,6 +108,9 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
+         runs_dir=resolve_path(root, None, "runs_dir"),
+         probability_source=args.probability_source,
+         probabilities_dir=resolve_path(root, args.probabilities_dir, None),
++        calibration=resolve_path(root, args.calibration, None),
++        ensemble=resolve_path(root, args.ensemble, None),
++        member_maps=_parse_member_maps(root, args.member_maps),
+         synthetic_pattern=args.synthetic_pattern,
+         synthetic_downsample=args.synthetic_downsample,
+         synthetic_mask_pattern=args.synthetic_mask_pattern,
+diff --git a/damage3d/pipeline.py b/damage3d/pipeline.py
+index c8b07a2..59db0a3 100644
+--- a/damage3d/pipeline.py
++++ b/damage3d/pipeline.py
+@@ -17,7 +17,7 @@ from .frames import resolve_frame
+ from .fusion import CAMERA_STAT_FIELDS, ChunkAccumulator, parse_thresholds
+ from .metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras
+ from .ply_io import PlyPointSource, make_selection
+-from .providers import FileProvider, SyntheticProvider
++from .providers import CalibratedProvider, EnsembleProvider, FileProvider, SyntheticProvider
+ from .run_state import RunDirectory, file_identity, normalise, short_hash, write_json_atomic
+ from .sampling import sample_probabilities
+ 
+@@ -40,6 +40,9 @@ class RunConfig:
+     runs_dir: Path
+     probability_source: str = "synthetic"
+     probabilities_dir: Path | None = None
++    calibration: Path | None = None          # scripts/27 JSON (files source): Platt + calibrated thresholds
++    ensemble: Path | None = None             # scripts/28 JSON (ensemble source): members, weights, thresholds
++    member_maps: dict | None = None          # {member name: maps dir} overrides for the ensemble source
+     synthetic_pattern: str = "regions"
+     synthetic_downsample: int = 8
+     synthetic_mask_pattern: str = "{stem}_mask_test.png"
+@@ -84,10 +87,30 @@ def _build_provider(cfg: RunConfig):
+             raise RuntimeError("--probability-source files requires --probabilities-dir.")
+         if not cfg.probabilities_dir.is_dir():
+             raise FileNotFoundError(f"Probabilities directory not found: {cfg.probabilities_dir}")
+-        return FileProvider(cfg.probabilities_dir)
++        if cfg.ensemble is not None:
++            raise RuntimeError("--ensemble requires --probability-source ensemble.")
++        base = FileProvider(cfg.probabilities_dir)
++        return CalibratedProvider(base, cfg.calibration) if cfg.calibration is not None else base
++    if cfg.probability_source == "ensemble":
++        if cfg.ensemble is None:
++            raise RuntimeError("--probability-source ensemble requires --ensemble <scripts/28 ensemble.json>.")
++        if cfg.calibration is not None:
++            raise RuntimeError("--calibration is for one model; the ensemble JSON already holds each member's Platt map.")
++        return EnsembleProvider(cfg.ensemble, cfg.project_root, cfg.member_maps)
+     raise ValueError(f"Unknown probability source '{cfg.probability_source}'.")
+ 
+ 
++def _resolve_thresholds(cfg: RunConfig) -> tuple[np.ndarray, str]:
++    """Explicit --thresholds win; otherwise the frozen thresholds of the calibration/ensemble JSON; else 0.5."""
++    if cfg.thresholds is not None:
++        return parse_thresholds(cfg.thresholds), "--thresholds"
++    json_path = cfg.ensemble if cfg.probability_source == "ensemble" else cfg.calibration
++    if json_path is not None:
++        from src.eval.probability_calibration import thresholds_from_json
++        return thresholds_from_json(json_path, DAMAGE_CLASSES), str(json_path)
++    return parse_thresholds(None), "default 0.5"
++
++
+ def _find_images(images_dir: Path | None, stems: list[str]) -> dict[str, Path | None]:
+     if images_dir is None or not images_dir.is_dir():
+         return {s: None for s in stems}
+@@ -222,7 +245,10 @@ def _print_plan(cfg: RunConfig, p: dict) -> None:
+     log.info("Point selection: %s", selection.describe())
+     log.info("Mesh: %s (occlusion=%s)", cfg.mesh, cfg.occlusion)
+     log.info("Selected cameras: %d -> first %s, last %s", len(selected), selected[0][1].label, selected[-1][1].label)
+-    log.info("Provider: %s", p["provider"].describe() if cfg.probability_source == "synthetic" else "files")
++    log.info("Provider: %s", p["provider"].describe() if cfg.probability_source == "synthetic"
++             else {k: v for k, v in p["provider"].describe().items() if k in ("type", "name", "run_name")})
++    thr, thr_source = _resolve_thresholds(cfg)
++    log.info("Thresholds (%s): %s", thr_source, ", ".join(f"{c}={t:.3f}" for c, t in zip(DAMAGE_CLASSES, thr)))
+     log.info("Estimates: %s", p["estimates"])
+     if not ct.is_identity and cfg.point_frame == "auto":
+         log.info("Frame: will be decided with the marker-to-mesh test (%s).", cfg.marker_reference)
+@@ -241,7 +267,7 @@ def run(cfg: RunConfig) -> dict:
+ 
+     project, selected, ply, selection, provider, ranges = (
+         p["project"], p["selected"], p["ply"], p["selection"], p["provider"], p["ranges"])
+-    if isinstance(provider, FileProvider):
++    if hasattr(provider, "register"):
+         provider.register([c.stem for _, c in selected])
+ 
+     occ = None
+@@ -324,10 +350,13 @@ def run(cfg: RunConfig) -> dict:
+ 
+     _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, centers, radii, frame, occ, abs_tol)
+ 
+-    thresholds = parse_thresholds(cfg.thresholds)
++    thresholds, thresholds_source = _resolve_thresholds(cfg)
++    log.info("Thresholds (%s): %s", thresholds_source,
++             ", ".join(f"{c}={t:.3f}" for c, t in zip(DAMAGE_CLASSES, thresholds)))
+     meta = {"provider_type": provider.describe()["type"], "synthetic": provider.is_synthetic,
+             "note": ("SYNTHETIC probabilities - NOT an AI prediction; thresholds are test values."
+                      if provider.is_synthetic else "Probabilities read from files."),
++            "thresholds_source": thresholds_source,
+             "frame": frame_record, "occlusion": tolerance_record, "warnings": cfg.warnings,
+             "interpolation": cfg.interpolation, "n_cameras": len(selected), "run_dir": str(rd.path)}
+     summary = export_run(rd, ranges, selection, ply, thresholds, cfg.min_views, cfg.export_scope,
+diff --git a/damage3d/providers.py b/damage3d/providers.py
+index 16cf98e..57e5b3b 100644
+--- a/damage3d/providers.py
++++ b/damage3d/providers.py
+@@ -27,6 +27,8 @@ Use ``save_probability_npz`` to write it from the future inference script.
+ from __future__ import annotations
+ 
+ import hashlib
++import json
++import logging
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -35,6 +37,8 @@ import numpy as np
+ 
+ from .classes import DAMAGE_CLASSES, NUM_CLASSES
+ 
++log = logging.getLogger("damage3d")
++
+ 
+ @dataclass
+ class ProbabilityMap:
+@@ -197,6 +201,139 @@ class FileProvider(ProbabilityProvider):
+                 "files": self._identities, "is_ai_prediction": True}
+ 
+ 
++# --------------------------------------------------------------------------- #
++# Platt-calibrated providers (single model and ensemble)
++# --------------------------------------------------------------------------- #
++MAPS_MANIFEST = "maps_manifest.json"
++
++
++def check_maps_checkpoint(maps_dir: Path, expected_sha256: str | None, label: str) -> None:
++    """Refuse maps written by a checkpoint different from the calibrated one.
++
++    The check uses ``maps_manifest.json`` of scripts/23 and the checkpoint hash
++    stored by scripts/27; it is skipped (with a warning) if either is missing.
++    """
++    manifest = Path(maps_dir) / MAPS_MANIFEST
++    if expected_sha256 is None or not manifest.is_file():
++        log.warning("%s: checkpoint/maps binding not verified (hash or %s missing).", label, MAPS_MANIFEST)
++        return
++    found = json.loads(manifest.read_text(encoding="utf-8")).get("settings", {}).get("checkpoint_sha256")
++    if found != expected_sha256:
++        raise ValueError(f"{label}: maps in {maps_dir} come from checkpoint {str(found)[:12]}, "
++                         f"calibration from {expected_sha256[:12]}.")
++
++
++class CalibratedProvider(ProbabilityProvider):
++    """Raw maps of ONE model + per-class Platt map (scripts/27 JSON)."""
++
++    def __init__(self, base: FileProvider, calibration_path: Path):
++        from src.eval.probability_calibration import load_platt, sha256_file
++
++        self.base = base
++        self.calibration_path = Path(calibration_path)
++        self.a, self.b, payload = load_platt(self.calibration_path, DAMAGE_CLASSES)
++        self.calibration_sha256 = sha256_file(self.calibration_path)
++        self.run_name = payload.get("run_name")
++        check_maps_checkpoint(base.dir, payload.get("checkpoint", {}).get("sha256"), str(self.run_name))
++
++    @property
++    def dir(self) -> Path:
++        return self.base.dir
++
++    def check_available(self, stems: list[str]) -> list[str]:
++        return self.base.check_available(stems)
++
++    def register(self, stems: list[str]) -> None:
++        self.base.register(stems)
++
++    def get(self, stem: str, width: int, height: int) -> ProbabilityMap:
++        from src.eval.probability_calibration import apply_platt
++
++        pmap = self.base.get(stem, width, height)
++        return ProbabilityMap(apply_platt(pmap.probs, self.a, self.b), pmap.valid)
++
++    def describe(self) -> dict:
++        return {"type": "files+platt", "base": self.base.describe(), "run_name": self.run_name,
++                "calibration": {"path": str(self.calibration_path), "sha256": self.calibration_sha256,
++                                "a": self.a.tolist(), "b": self.b.tolist()},
++                "is_ai_prediction": True}
++
++
++class EnsembleProvider(ProbabilityProvider):
++    """Weighted mean of Platt-calibrated maps of several models (scripts/28 JSON).
++
++    p_ens(x, c) = sum_m w_m * sigmoid(a_mc * logit(p_m(x, c)) + b_mc),  sum_m w_m = 1.
++    Fusion then averages p_ens over the views of each 3D point, i.e. the fused
++    score is the weighted mean of the calibrated probabilities over models
++    and views. All members must store maps of the same size (same
++    ``--downsample`` in scripts/23); ``valid`` is the AND of the members.
++    """
++
++    def __init__(self, ensemble_path: Path, project_root: Path, member_maps: dict[str, Path] | None = None):
++        from src.eval.probability_calibration import FORMAT_ENSEMBLE, params_arrays, read_json, sha256_file
++
++        self.ensemble_path = Path(ensemble_path)
++        payload = read_json(self.ensemble_path)
++        if payload.get("format") != FORMAT_ENSEMBLE:
++            raise ValueError(f"{ensemble_path}: format '{payload.get('format')}' != '{FORMAT_ENSEMBLE}'.")
++        if list(payload.get("classes", [])) != list(DAMAGE_CLASSES):
++            raise ValueError(f"{ensemble_path}: class order {payload.get('classes')} != {list(DAMAGE_CLASSES)}.")
++        self.ensemble_sha256 = sha256_file(self.ensemble_path)
++        self.name = payload.get("name")
++        member_maps = dict(member_maps or {})
++        unknown = set(member_maps) - {m["name"] for m in payload["members"]}
++        if unknown:
++            raise ValueError(f"--member-maps refers to unknown members {sorted(unknown)}.")
++        self.members = []
++        for m in payload["members"]:
++            maps_dir = Path(member_maps.get(m["name"]) or Path(project_root) / "damage3d_maps" / Path(m["run_dir"]).name)
++            if not maps_dir.is_dir():
++                raise FileNotFoundError(f"Maps of member '{m['name']}' not found: {maps_dir} (use --member-maps).")
++            check_maps_checkpoint(maps_dir, m.get("checkpoint_sha256"), m["name"])
++            a, b = params_arrays(m["params"], DAMAGE_CLASSES)
++            self.members.append({"name": m["name"], "provider": FileProvider(maps_dir), "a": a, "b": b,
++                                 "weight": float(m["weight"])})
++        total = sum(m["weight"] for m in self.members)
++        if not self.members or total <= 0:
++            raise ValueError(f"{ensemble_path}: no members or non-positive weights.")
++        for m in self.members:
++            m["weight"] /= total
++
++    @property
++    def dir(self) -> list[str]:
++        return [str(m["provider"].dir) for m in self.members]
++
++    def check_available(self, stems: list[str]) -> list[str]:
++        return sorted({s for m in self.members for s in m["provider"].check_available(stems)})
++
++    def register(self, stems: list[str]) -> None:
++        for m in self.members:
++            m["provider"].register(stems)
++
++    def get(self, stem: str, width: int, height: int) -> ProbabilityMap:
++        from src.eval.probability_calibration import apply_platt
++
++        probs, valid, shape = None, None, None
++        for m in self.members:
++            pmap = m["provider"].get(stem, width, height)
++            if shape is not None and pmap.probs.shape != shape:
++                raise ValueError(f"{stem}: member '{m['name']}' map {pmap.probs.shape} != {shape}; "
++                                 "write all members with the same --downsample.")
++            shape = pmap.probs.shape
++            term = m["weight"] * apply_platt(pmap.probs, m["a"], m["b"])
++            probs = term if probs is None else probs + term   # NaN in any member -> NaN (no prediction)
++            if pmap.valid is not None:
++                valid = pmap.valid if valid is None else (valid & pmap.valid)
++        return ProbabilityMap(np.clip(probs, 0.0, 1.0).astype(np.float32), valid)
++
++    def describe(self) -> dict:
++        return {"type": "ensemble+platt", "name": self.name,
++                "ensemble": {"path": str(self.ensemble_path), "sha256": self.ensemble_sha256},
++                "members": [{"name": m["name"], "weight": m["weight"], "a": m["a"].tolist(), "b": m["b"].tolist(),
++                             "maps": m["provider"].describe()} for m in self.members],
++                "is_ai_prediction": True}
++
++
+ def save_probability_npz(path: Path, probs: np.ndarray, valid: np.ndarray | None = None,
+                          dtype: str = "float16") -> None:
+     """Helper for the future inference script (writes the FileProvider format)."""
+diff --git a/scripts/23_infer_probability_maps.py b/scripts/23_infer_probability_maps.py
+index b4556c7..daad586 100644
+--- a/scripts/23_infer_probability_maps.py
++++ b/scripts/23_infer_probability_maps.py
+@@ -27,6 +27,16 @@ Then:
+     python -m damage3d --probability-source files \
+         --probabilities-dir <maps dir printed by this script> \
+         --start-image 76 --end-image 86 --thresholds "<frozen thresholds>"
++
++Platt calibration (scripts/27)
++------------------------------
++Maps are ALWAYS stored raw (the exact network output), so the same maps
++serve the single-model run and any ensemble (scripts/28). With
++``--calibration auto`` (= <run>/eval_curves/probability_calibration.json) or
++``--calibration <file>``, the overlays are rendered on calibrated
++probabilities with the calibrated frozen thresholds of that file, the
++checkpoint hash is checked against the file, and the printed damage3d
++command uses ``--calibration`` (damage3d applies the same map when reading).
+ """
+ 
+ from __future__ import annotations
+@@ -52,7 +62,7 @@ from damage3d.classes import CLASS_COLORS, DAMAGE_CLASSES
+ from damage3d.fusion import parse_thresholds  
+ from damage3d.metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras  
+ from damage3d.paths import resolve_path, resolve_project_root  
+-from damage3d.providers import FileProvider, save_probability_npz  
++from damage3d.providers import CalibratedProvider, FileProvider, save_probability_npz  
+ from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES  
+ from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD  
+ from src.engine import load_checkpoint  
+@@ -63,6 +73,7 @@ from src.utils import get_device, load_config
+ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+ CALIBRATED_THRESHOLDS = Path("eval_multilabel_sliding_calibrated") / "thresholds_per_class_validation_calibrated.json"
+ MANIFEST_NAME = "maps_manifest.json"
++PLATT_JSON = Path("eval_curves") / "probability_calibration.json"
+ 
+ 
+ def parse_args(argv=None) -> argparse.Namespace:
+@@ -91,7 +102,11 @@ def parse_args(argv=None) -> argparse.Namespace:
+     g.add_argument("--save-overlays", action="store_true",
+                    help="write overlays/<stem>_overlay.jpg (also for maps that already exist)")
+     g.add_argument("--overlay-thresholds",
+-                   help="'0.5' or 'crack=0.7,...'; default: frozen validation thresholds of the run")
++                   help="'0.5' or 'crack=0.7,...'; default: frozen thresholds of --calibration, "
++                        "else frozen validation thresholds of the run (scripts/17)")
++    g.add_argument("--calibration", default=None,
++                   help="'auto' (<run>/eval_curves/probability_calibration.json) or a scripts/27 JSON: "
++                        "calibrated overlays + damage3d command with --calibration; maps stay raw")
+     g.add_argument("--overlay-width", type=int, default=1200, help="width of each panel in pixels")
+     g.add_argument("--overlay-alpha", type=float, default=0.5, help="opacity of the class colors")
+     return p.parse_args(argv)
+@@ -221,6 +236,15 @@ def frozen_thresholds(run_dir: Path) -> tuple[str | None, Path]:
+     return ",".join(f"{c}={thr[f'threshold_{c}']}" for c in DAMAGE_CLASSES), path
+ 
+ 
++def resolve_calibration(arg: str | None, run_dir: Path) -> Path | None:
++    if arg is None:
++        return None
++    path = run_dir / PLATT_JSON if arg == "auto" else Path(arg).resolve()
++    if not path.is_file():
++        raise SystemExit(f"Calibration file not found: {path} (run scripts/27 first).")
++    return path
++
++
+ def main(argv=None) -> int:
+     args = parse_args(argv)
+     if args.downsample < 1:
+@@ -257,6 +281,15 @@ def main(argv=None) -> int:
+     stride = int(args.stride or patch.eval_stride)
+     batch_size = int(args.batch_size or patch.eval_batch_size)
+     thr_string, thr_path = frozen_thresholds(run_dir)
++    calibration_path = resolve_calibration(args.calibration, run_dir)
++    cal_string = None
++    if calibration_path is not None:
++        from src.eval.probability_calibration import load_platt
++        _, _, cal_payload = load_platt(calibration_path, DAMAGE_CLASSES)
++        if Path(cal_payload["run_dir"]).name != run_dir.name:
++            raise SystemExit(f"{calibration_path} belongs to run '{Path(cal_payload['run_dir']).name}', "
++                             f"not '{run_dir.name}'.")
++        cal_string = ",".join(f"{c}={cal_payload['thresholds_calibrated'][c]:.4f}" for c in DAMAGE_CLASSES)
+ 
+     print(f"Run: {run_dir.name} | checkpoint {checkpoint_path.name}")
+     print(f"Cameras: {len(selected)} ({selected[0][1].label} .. {selected[-1][1].label}) from {xml_path}")
+@@ -268,9 +301,11 @@ def main(argv=None) -> int:
+     print(f"Sliding window: patch {patch.patch_size}, stride {stride}, batch {batch_size}, blend {patch.blend_mode} "
+           f"| photo {calib0.width}x{calib0.height} -> {n_patches} patches per photo")
+     print(f"Frozen validation thresholds: {thr_string or f'not found ({thr_path})'}")
++    if calibration_path is not None:
++        print(f"Platt calibration: {calibration_path} -> calibrated thresholds {cal_string}")
+     overlay_thr = None
+     if args.save_overlays:
+-        source = args.overlay_thresholds or thr_string
++        source = args.overlay_thresholds or cal_string or thr_string
+         if source is None:
+             raise SystemExit(f"--save-overlays needs thresholds: {thr_path} not found, "
+                              f"pass --overlay-thresholds explicitly.")
+@@ -283,6 +318,11 @@ def main(argv=None) -> int:
+     out_dir.mkdir(parents=True, exist_ok=True)
+     manifest_path = out_dir / MANIFEST_NAME
+     checkpoint_sha = sha256_file(checkpoint_path)
++    if calibration_path is not None:
++        expected = cal_payload.get("checkpoint", {}).get("sha256")
++        if expected is not None and expected != checkpoint_sha:
++            raise SystemExit(f"{calibration_path} was fitted on checkpoint {expected[:12]}, "
++                             f"not on {checkpoint_path.name} ({checkpoint_sha[:12]}).")
+     settings = {
+         "run_dir": str(run_dir), "checkpoint": checkpoint_path.name, "checkpoint_sha256": checkpoint_sha,
+         "model": {k: cfg.model.get(k) for k in ("arch", "encoder", "classes", "decoder_attention_type")},
+@@ -304,11 +344,14 @@ def main(argv=None) -> int:
+     if args.save_overlays:
+         overlay_dir.mkdir(exist_ok=True)
+     stored_maps = FileProvider(out_dir)
++    # Overlays read the stored map exactly as damage3d does (raw, or raw + the same Platt map).
++    overlay_reader = stored_maps if calibration_path is None else _CalibratedReader(stored_maps, calibration_path)
+ 
+     def save_overlay(cam, image: np.ndarray, calib) -> None:
+-        pmap = stored_maps.get(cam.stem, calib.width, calib.height)  # same reader and checks as damage3d
++        pmap = overlay_reader.get(cam.stem, calib.width, calib.height)  # same reader and checks as damage3d
+         grid, _ = render_overlay(image, pmap.probs, overlay_thr,
+-                                 title=f"{cam.label} | {run_dir.name} | map {pmap.probs.shape[2]}x{pmap.probs.shape[1]}",
++                                 title=f"{cam.label} | {run_dir.name}{' | Platt' if calibration_path else ''} "
++                                       f"| map {pmap.probs.shape[2]}x{pmap.probs.shape[1]}",
+                                  panel_width=args.overlay_width, alpha=args.overlay_alpha)
+         write_jpeg(overlay_dir / f"{cam.stem}_overlay.jpg", grid)
+ 
+@@ -360,10 +403,24 @@ def main(argv=None) -> int:
+     print(f"\nMaps folder: {out_dir}")
+     if args.save_overlays:
+         print(f"Overlays folder: {overlay_dir}")
+-    if thr_string:
++    if calibration_path is not None:
++        print(f'damage3d (calibrated): --probability-source files --probabilities-dir "{out_dir}" '
++              f'--calibration "{calibration_path}"   (thresholds read from the JSON)')
++    elif thr_string:
+         print(f'damage3d thresholds (frozen, from {thr_path.name}): --thresholds "{thr_string}"')
+     return 0
+ 
+ 
++class _CalibratedReader(CalibratedProvider):
++    """CalibratedProvider without the manifest check (the manifest is being written by this script)."""
++
++    def __init__(self, base: FileProvider, calibration_path: Path):
++        from src.eval.probability_calibration import load_platt, sha256_file
++        self.base, self.calibration_path = base, Path(calibration_path)
++        self.a, self.b, payload = load_platt(self.calibration_path, DAMAGE_CLASSES)
++        self.calibration_sha256 = sha256_file(self.calibration_path)
++        self.run_name = payload.get("run_name")
++
++
+ if __name__ == "__main__":
+     raise SystemExit(main())

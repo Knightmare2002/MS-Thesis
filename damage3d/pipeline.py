@@ -17,7 +17,7 @@ from .frames import resolve_frame
 from .fusion import CAMERA_STAT_FIELDS, ChunkAccumulator, parse_thresholds
 from .metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras
 from .ply_io import PlyPointSource, make_selection
-from .providers import FileProvider, SyntheticProvider
+from .providers import CalibratedProvider, EnsembleProvider, FileProvider, SyntheticProvider
 from .run_state import RunDirectory, file_identity, normalise, short_hash, write_json_atomic
 from .sampling import sample_probabilities
 
@@ -40,6 +40,9 @@ class RunConfig:
     runs_dir: Path
     probability_source: str = "synthetic"
     probabilities_dir: Path | None = None
+    calibration: Path | None = None          # scripts/27 JSON (files source): Platt + calibrated thresholds
+    ensemble: Path | None = None             # scripts/28 JSON (ensemble source): members, weights, thresholds
+    member_maps: dict | None = None          # {member name: maps dir} overrides for the ensemble source
     synthetic_pattern: str = "regions"
     synthetic_downsample: int = 8
     synthetic_mask_pattern: str = "{stem}_mask_test.png"
@@ -84,8 +87,28 @@ def _build_provider(cfg: RunConfig):
             raise RuntimeError("--probability-source files requires --probabilities-dir.")
         if not cfg.probabilities_dir.is_dir():
             raise FileNotFoundError(f"Probabilities directory not found: {cfg.probabilities_dir}")
-        return FileProvider(cfg.probabilities_dir)
+        if cfg.ensemble is not None:
+            raise RuntimeError("--ensemble requires --probability-source ensemble.")
+        base = FileProvider(cfg.probabilities_dir)
+        return CalibratedProvider(base, cfg.calibration) if cfg.calibration is not None else base
+    if cfg.probability_source == "ensemble":
+        if cfg.ensemble is None:
+            raise RuntimeError("--probability-source ensemble requires --ensemble <scripts/28 ensemble.json>.")
+        if cfg.calibration is not None:
+            raise RuntimeError("--calibration is for one model; the ensemble JSON already holds each member's Platt map.")
+        return EnsembleProvider(cfg.ensemble, cfg.project_root, cfg.member_maps)
     raise ValueError(f"Unknown probability source '{cfg.probability_source}'.")
+
+
+def _resolve_thresholds(cfg: RunConfig) -> tuple[np.ndarray, str]:
+    """Explicit --thresholds win; otherwise the frozen thresholds of the calibration/ensemble JSON; else 0.5."""
+    if cfg.thresholds is not None:
+        return parse_thresholds(cfg.thresholds), "--thresholds"
+    json_path = cfg.ensemble if cfg.probability_source == "ensemble" else cfg.calibration
+    if json_path is not None:
+        from src.eval.probability_calibration import thresholds_from_json
+        return thresholds_from_json(json_path, DAMAGE_CLASSES), str(json_path)
+    return parse_thresholds(None), "default 0.5"
 
 
 def _find_images(images_dir: Path | None, stems: list[str]) -> dict[str, Path | None]:
@@ -222,7 +245,10 @@ def _print_plan(cfg: RunConfig, p: dict) -> None:
     log.info("Point selection: %s", selection.describe())
     log.info("Mesh: %s (occlusion=%s)", cfg.mesh, cfg.occlusion)
     log.info("Selected cameras: %d -> first %s, last %s", len(selected), selected[0][1].label, selected[-1][1].label)
-    log.info("Provider: %s", p["provider"].describe() if cfg.probability_source == "synthetic" else "files")
+    log.info("Provider: %s", p["provider"].describe() if cfg.probability_source == "synthetic"
+             else {k: v for k, v in p["provider"].describe().items() if k in ("type", "name", "run_name")})
+    thr, thr_source = _resolve_thresholds(cfg)
+    log.info("Thresholds (%s): %s", thr_source, ", ".join(f"{c}={t:.3f}" for c, t in zip(DAMAGE_CLASSES, thr)))
     log.info("Estimates: %s", p["estimates"])
     if not ct.is_identity and cfg.point_frame == "auto":
         log.info("Frame: will be decided with the marker-to-mesh test (%s).", cfg.marker_reference)
@@ -241,7 +267,7 @@ def run(cfg: RunConfig) -> dict:
 
     project, selected, ply, selection, provider, ranges = (
         p["project"], p["selected"], p["ply"], p["selection"], p["provider"], p["ranges"])
-    if isinstance(provider, FileProvider):
+    if hasattr(provider, "register"):
         provider.register([c.stem for _, c in selected])
 
     occ = None
@@ -324,10 +350,13 @@ def run(cfg: RunConfig) -> dict:
 
     _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, centers, radii, frame, occ, abs_tol)
 
-    thresholds = parse_thresholds(cfg.thresholds)
+    thresholds, thresholds_source = _resolve_thresholds(cfg)
+    log.info("Thresholds (%s): %s", thresholds_source,
+             ", ".join(f"{c}={t:.3f}" for c, t in zip(DAMAGE_CLASSES, thresholds)))
     meta = {"provider_type": provider.describe()["type"], "synthetic": provider.is_synthetic,
             "note": ("SYNTHETIC probabilities - NOT an AI prediction; thresholds are test values."
                      if provider.is_synthetic else "Probabilities read from files."),
+            "thresholds_source": thresholds_source,
             "frame": frame_record, "occlusion": tolerance_record, "warnings": cfg.warnings,
             "interpolation": cfg.interpolation, "n_cameras": len(selected), "run_dir": str(rd.path)}
     summary = export_run(rd, ranges, selection, ply, thresholds, cfg.min_views, cfg.export_scope,

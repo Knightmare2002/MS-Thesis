@@ -27,6 +27,8 @@ Use ``save_probability_npz`` to write it from the future inference script.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,8 @@ from pathlib import Path
 import numpy as np
 
 from .classes import DAMAGE_CLASSES, NUM_CLASSES
+
+log = logging.getLogger("damage3d")
 
 
 @dataclass
@@ -195,6 +199,139 @@ class FileProvider(ProbabilityProvider):
     def describe(self) -> dict:
         return {"type": "files", "dir": str(self.dir), "pattern": self.pattern,
                 "files": self._identities, "is_ai_prediction": True}
+
+
+# --------------------------------------------------------------------------- #
+# Platt-calibrated providers (single model and ensemble)
+# --------------------------------------------------------------------------- #
+MAPS_MANIFEST = "maps_manifest.json"
+
+
+def check_maps_checkpoint(maps_dir: Path, expected_sha256: str | None, label: str) -> None:
+    """Refuse maps written by a checkpoint different from the calibrated one.
+
+    The check uses ``maps_manifest.json`` of scripts/23 and the checkpoint hash
+    stored by scripts/27; it is skipped (with a warning) if either is missing.
+    """
+    manifest = Path(maps_dir) / MAPS_MANIFEST
+    if expected_sha256 is None or not manifest.is_file():
+        log.warning("%s: checkpoint/maps binding not verified (hash or %s missing).", label, MAPS_MANIFEST)
+        return
+    found = json.loads(manifest.read_text(encoding="utf-8")).get("settings", {}).get("checkpoint_sha256")
+    if found != expected_sha256:
+        raise ValueError(f"{label}: maps in {maps_dir} come from checkpoint {str(found)[:12]}, "
+                         f"calibration from {expected_sha256[:12]}.")
+
+
+class CalibratedProvider(ProbabilityProvider):
+    """Raw maps of ONE model + per-class Platt map (scripts/27 JSON)."""
+
+    def __init__(self, base: FileProvider, calibration_path: Path):
+        from src.eval.probability_calibration import load_platt, sha256_file
+
+        self.base = base
+        self.calibration_path = Path(calibration_path)
+        self.a, self.b, payload = load_platt(self.calibration_path, DAMAGE_CLASSES)
+        self.calibration_sha256 = sha256_file(self.calibration_path)
+        self.run_name = payload.get("run_name")
+        check_maps_checkpoint(base.dir, payload.get("checkpoint", {}).get("sha256"), str(self.run_name))
+
+    @property
+    def dir(self) -> Path:
+        return self.base.dir
+
+    def check_available(self, stems: list[str]) -> list[str]:
+        return self.base.check_available(stems)
+
+    def register(self, stems: list[str]) -> None:
+        self.base.register(stems)
+
+    def get(self, stem: str, width: int, height: int) -> ProbabilityMap:
+        from src.eval.probability_calibration import apply_platt
+
+        pmap = self.base.get(stem, width, height)
+        return ProbabilityMap(apply_platt(pmap.probs, self.a, self.b), pmap.valid)
+
+    def describe(self) -> dict:
+        return {"type": "files+platt", "base": self.base.describe(), "run_name": self.run_name,
+                "calibration": {"path": str(self.calibration_path), "sha256": self.calibration_sha256,
+                                "a": self.a.tolist(), "b": self.b.tolist()},
+                "is_ai_prediction": True}
+
+
+class EnsembleProvider(ProbabilityProvider):
+    """Weighted mean of Platt-calibrated maps of several models (scripts/28 JSON).
+
+    p_ens(x, c) = sum_m w_m * sigmoid(a_mc * logit(p_m(x, c)) + b_mc),  sum_m w_m = 1.
+    Fusion then averages p_ens over the views of each 3D point, i.e. the fused
+    score is the weighted mean of the calibrated probabilities over models
+    and views. All members must store maps of the same size (same
+    ``--downsample`` in scripts/23); ``valid`` is the AND of the members.
+    """
+
+    def __init__(self, ensemble_path: Path, project_root: Path, member_maps: dict[str, Path] | None = None):
+        from src.eval.probability_calibration import FORMAT_ENSEMBLE, params_arrays, read_json, sha256_file
+
+        self.ensemble_path = Path(ensemble_path)
+        payload = read_json(self.ensemble_path)
+        if payload.get("format") != FORMAT_ENSEMBLE:
+            raise ValueError(f"{ensemble_path}: format '{payload.get('format')}' != '{FORMAT_ENSEMBLE}'.")
+        if list(payload.get("classes", [])) != list(DAMAGE_CLASSES):
+            raise ValueError(f"{ensemble_path}: class order {payload.get('classes')} != {list(DAMAGE_CLASSES)}.")
+        self.ensemble_sha256 = sha256_file(self.ensemble_path)
+        self.name = payload.get("name")
+        member_maps = dict(member_maps or {})
+        unknown = set(member_maps) - {m["name"] for m in payload["members"]}
+        if unknown:
+            raise ValueError(f"--member-maps refers to unknown members {sorted(unknown)}.")
+        self.members = []
+        for m in payload["members"]:
+            maps_dir = Path(member_maps.get(m["name"]) or Path(project_root) / "damage3d_maps" / Path(m["run_dir"]).name)
+            if not maps_dir.is_dir():
+                raise FileNotFoundError(f"Maps of member '{m['name']}' not found: {maps_dir} (use --member-maps).")
+            check_maps_checkpoint(maps_dir, m.get("checkpoint_sha256"), m["name"])
+            a, b = params_arrays(m["params"], DAMAGE_CLASSES)
+            self.members.append({"name": m["name"], "provider": FileProvider(maps_dir), "a": a, "b": b,
+                                 "weight": float(m["weight"])})
+        total = sum(m["weight"] for m in self.members)
+        if not self.members or total <= 0:
+            raise ValueError(f"{ensemble_path}: no members or non-positive weights.")
+        for m in self.members:
+            m["weight"] /= total
+
+    @property
+    def dir(self) -> list[str]:
+        return [str(m["provider"].dir) for m in self.members]
+
+    def check_available(self, stems: list[str]) -> list[str]:
+        return sorted({s for m in self.members for s in m["provider"].check_available(stems)})
+
+    def register(self, stems: list[str]) -> None:
+        for m in self.members:
+            m["provider"].register(stems)
+
+    def get(self, stem: str, width: int, height: int) -> ProbabilityMap:
+        from src.eval.probability_calibration import apply_platt
+
+        probs, valid, shape = None, None, None
+        for m in self.members:
+            pmap = m["provider"].get(stem, width, height)
+            if shape is not None and pmap.probs.shape != shape:
+                raise ValueError(f"{stem}: member '{m['name']}' map {pmap.probs.shape} != {shape}; "
+                                 "write all members with the same --downsample.")
+            shape = pmap.probs.shape
+            term = m["weight"] * apply_platt(pmap.probs, m["a"], m["b"])
+            probs = term if probs is None else probs + term   # NaN in any member -> NaN (no prediction)
+            if pmap.valid is not None:
+                valid = pmap.valid if valid is None else (valid & pmap.valid)
+        return ProbabilityMap(np.clip(probs, 0.0, 1.0).astype(np.float32), valid)
+
+    def describe(self) -> dict:
+        return {"type": "ensemble+platt", "name": self.name,
+                "ensemble": {"path": str(self.ensemble_path), "sha256": self.ensemble_sha256},
+                "members": [{"name": m["name"], "weight": m["weight"], "a": m["a"].tolist(), "b": m["b"].tolist(),
+                             "maps": m["provider"].describe()} for m in self.members],
+                "is_ai_prediction": True}
 
 
 def save_probability_npz(path: Path, probs: np.ndarray, valid: np.ndarray | None = None,

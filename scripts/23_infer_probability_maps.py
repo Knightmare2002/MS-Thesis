@@ -27,6 +27,16 @@ Then:
     python -m damage3d --probability-source files \
         --probabilities-dir <maps dir printed by this script> \
         --start-image 76 --end-image 86 --thresholds "<frozen thresholds>"
+
+Platt calibration (scripts/27)
+------------------------------
+Maps are ALWAYS stored raw (the exact network output), so the same maps
+serve the single-model run and any ensemble (scripts/28). With
+``--calibration auto`` (= <run>/eval_curves/probability_calibration.json) or
+``--calibration <file>``, the overlays are rendered on calibrated
+probabilities with the calibrated frozen thresholds of that file, the
+checkpoint hash is checked against the file, and the printed damage3d
+command uses ``--calibration`` (damage3d applies the same map when reading).
 """
 
 from __future__ import annotations
@@ -52,7 +62,7 @@ from damage3d.classes import CLASS_COLORS, DAMAGE_CLASSES
 from damage3d.fusion import parse_thresholds  
 from damage3d.metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras  
 from damage3d.paths import resolve_path, resolve_project_root  
-from damage3d.providers import FileProvider, save_probability_npz  
+from damage3d.providers import CalibratedProvider, FileProvider, save_probability_npz  
 from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES  
 from src.data.transforms import IMAGENET_MEAN, IMAGENET_STD  
 from src.engine import load_checkpoint  
@@ -63,6 +73,7 @@ from src.utils import get_device, load_config
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 CALIBRATED_THRESHOLDS = Path("eval_multilabel_sliding_calibrated") / "thresholds_per_class_validation_calibrated.json"
 MANIFEST_NAME = "maps_manifest.json"
+PLATT_JSON = Path("eval_curves") / "probability_calibration.json"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -91,7 +102,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--save-overlays", action="store_true",
                    help="write overlays/<stem>_overlay.jpg (also for maps that already exist)")
     g.add_argument("--overlay-thresholds",
-                   help="'0.5' or 'crack=0.7,...'; default: frozen validation thresholds of the run")
+                   help="'0.5' or 'crack=0.7,...'; default: frozen thresholds of --calibration, "
+                        "else frozen validation thresholds of the run (scripts/17)")
+    g.add_argument("--calibration", default=None,
+                   help="'auto' (<run>/eval_curves/probability_calibration.json) or a scripts/27 JSON: "
+                        "calibrated overlays + damage3d command with --calibration; maps stay raw")
     g.add_argument("--overlay-width", type=int, default=1200, help="width of each panel in pixels")
     g.add_argument("--overlay-alpha", type=float, default=0.5, help="opacity of the class colors")
     return p.parse_args(argv)
@@ -221,6 +236,15 @@ def frozen_thresholds(run_dir: Path) -> tuple[str | None, Path]:
     return ",".join(f"{c}={thr[f'threshold_{c}']}" for c in DAMAGE_CLASSES), path
 
 
+def resolve_calibration(arg: str | None, run_dir: Path) -> Path | None:
+    if arg is None:
+        return None
+    path = run_dir / PLATT_JSON if arg == "auto" else Path(arg).resolve()
+    if not path.is_file():
+        raise SystemExit(f"Calibration file not found: {path} (run scripts/27 first).")
+    return path
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     if args.downsample < 1:
@@ -257,6 +281,15 @@ def main(argv=None) -> int:
     stride = int(args.stride or patch.eval_stride)
     batch_size = int(args.batch_size or patch.eval_batch_size)
     thr_string, thr_path = frozen_thresholds(run_dir)
+    calibration_path = resolve_calibration(args.calibration, run_dir)
+    cal_string = None
+    if calibration_path is not None:
+        from src.eval.probability_calibration import load_platt
+        _, _, cal_payload = load_platt(calibration_path, DAMAGE_CLASSES)
+        if Path(cal_payload["run_dir"]).name != run_dir.name:
+            raise SystemExit(f"{calibration_path} belongs to run '{Path(cal_payload['run_dir']).name}', "
+                             f"not '{run_dir.name}'.")
+        cal_string = ",".join(f"{c}={cal_payload['thresholds_calibrated'][c]:.4f}" for c in DAMAGE_CLASSES)
 
     print(f"Run: {run_dir.name} | checkpoint {checkpoint_path.name}")
     print(f"Cameras: {len(selected)} ({selected[0][1].label} .. {selected[-1][1].label}) from {xml_path}")
@@ -268,9 +301,11 @@ def main(argv=None) -> int:
     print(f"Sliding window: patch {patch.patch_size}, stride {stride}, batch {batch_size}, blend {patch.blend_mode} "
           f"| photo {calib0.width}x{calib0.height} -> {n_patches} patches per photo")
     print(f"Frozen validation thresholds: {thr_string or f'not found ({thr_path})'}")
+    if calibration_path is not None:
+        print(f"Platt calibration: {calibration_path} -> calibrated thresholds {cal_string}")
     overlay_thr = None
     if args.save_overlays:
-        source = args.overlay_thresholds or thr_string
+        source = args.overlay_thresholds or cal_string or thr_string
         if source is None:
             raise SystemExit(f"--save-overlays needs thresholds: {thr_path} not found, "
                              f"pass --overlay-thresholds explicitly.")
@@ -283,6 +318,11 @@ def main(argv=None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / MANIFEST_NAME
     checkpoint_sha = sha256_file(checkpoint_path)
+    if calibration_path is not None:
+        expected = cal_payload.get("checkpoint", {}).get("sha256")
+        if expected is not None and expected != checkpoint_sha:
+            raise SystemExit(f"{calibration_path} was fitted on checkpoint {expected[:12]}, "
+                             f"not on {checkpoint_path.name} ({checkpoint_sha[:12]}).")
     settings = {
         "run_dir": str(run_dir), "checkpoint": checkpoint_path.name, "checkpoint_sha256": checkpoint_sha,
         "model": {k: cfg.model.get(k) for k in ("arch", "encoder", "classes", "decoder_attention_type")},
@@ -304,11 +344,14 @@ def main(argv=None) -> int:
     if args.save_overlays:
         overlay_dir.mkdir(exist_ok=True)
     stored_maps = FileProvider(out_dir)
+    # Overlays read the stored map exactly as damage3d does (raw, or raw + the same Platt map).
+    overlay_reader = stored_maps if calibration_path is None else _CalibratedReader(stored_maps, calibration_path)
 
     def save_overlay(cam, image: np.ndarray, calib) -> None:
-        pmap = stored_maps.get(cam.stem, calib.width, calib.height)  # same reader and checks as damage3d
+        pmap = overlay_reader.get(cam.stem, calib.width, calib.height)  # same reader and checks as damage3d
         grid, _ = render_overlay(image, pmap.probs, overlay_thr,
-                                 title=f"{cam.label} | {run_dir.name} | map {pmap.probs.shape[2]}x{pmap.probs.shape[1]}",
+                                 title=f"{cam.label} | {run_dir.name}{' | Platt' if calibration_path else ''} "
+                                       f"| map {pmap.probs.shape[2]}x{pmap.probs.shape[1]}",
                                  panel_width=args.overlay_width, alpha=args.overlay_alpha)
         write_jpeg(overlay_dir / f"{cam.stem}_overlay.jpg", grid)
 
@@ -360,9 +403,23 @@ def main(argv=None) -> int:
     print(f"\nMaps folder: {out_dir}")
     if args.save_overlays:
         print(f"Overlays folder: {overlay_dir}")
-    if thr_string:
+    if calibration_path is not None:
+        print(f'damage3d (calibrated): --probability-source files --probabilities-dir "{out_dir}" '
+              f'--calibration "{calibration_path}"   (thresholds read from the JSON)')
+    elif thr_string:
         print(f'damage3d thresholds (frozen, from {thr_path.name}): --thresholds "{thr_string}"')
     return 0
+
+
+class _CalibratedReader(CalibratedProvider):
+    """CalibratedProvider without the manifest check (the manifest is being written by this script)."""
+
+    def __init__(self, base: FileProvider, calibration_path: Path):
+        from src.eval.probability_calibration import load_platt, sha256_file
+        self.base, self.calibration_path = base, Path(calibration_path)
+        self.a, self.b, payload = load_platt(self.calibration_path, DAMAGE_CLASSES)
+        self.calibration_sha256 = sha256_file(self.calibration_path)
+        self.run_name = payload.get("run_name")
 
 
 if __name__ == "__main__":

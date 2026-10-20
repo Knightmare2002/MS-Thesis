@@ -27,8 +27,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--output-dir", help="run directory; default <project-root>/damage3d_runs/<auto name>")
 
     g = p.add_argument_group("probabilities")
-    g.add_argument("--probability-source", choices=("synthetic", "files"), default="synthetic")
+    g.add_argument("--probability-source", choices=("synthetic", "files", "ensemble"), default="synthetic")
     g.add_argument("--probabilities-dir", help="folder with <stem>.npz maps (files provider)")
+    g.add_argument("--calibration",
+                   help="files source: scripts/27 probability_calibration.json of the model that wrote the maps; "
+                        "applies its per-class Platt map and, unless --thresholds is given, its thresholds_calibrated")
+    g.add_argument("--ensemble",
+                   help="ensemble source: scripts/28 ensemble.json (members, weights, Platt maps, thresholds)")
+    g.add_argument("--member-maps", action="append", default=[], metavar="NAME=DIR",
+                   help="maps folder of an ensemble member (repeatable); default <project-root>/damage3d_maps/<run name>")
     g.add_argument("--synthetic-pattern", choices=("regions", "mask"), default="regions",
                    help="'regions': six overlapping Gaussian bumps; 'mask': prototype PNG mask")
     g.add_argument("--synthetic-downsample", type=int, default=8, help="resolution divisor of synthetic maps")
@@ -62,8 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = p.add_argument_group("fusion and export (can change on --resume: outputs are re-exported)")
     g.add_argument("--vote-threshold", type=float, default=0.5, help="per-view threshold for the votes counters")
-    g.add_argument("--thresholds", default="0.5",
-                   help="'0.5' or 'crack=0.5,spalling=0.5,...'; synthetic runs: declared TEST thresholds")
+    g.add_argument("--thresholds", default=None,
+                   help="'0.5' or 'crack=0.5,spalling=0.5,...' (overrides the JSON thresholds); default: "
+                        "frozen thresholds of --calibration/--ensemble, else 0.5. Synthetic runs: TEST thresholds")
     g.add_argument("--min-views", type=int, default=1)
     g.add_argument("--export-scope", choices=("all", "observed", "damage"), default="all")
     g.add_argument("--csv-max-points", type=int, default=200_000)
@@ -74,6 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--verbose", action="store_true")
     g.add_argument("--test-interrupt-after-writes", type=int, help=argparse.SUPPRESS)
     return p
+
+
+def _parse_member_maps(root, items: list[str]) -> dict:
+    out = {}
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"--member-maps expects NAME=DIR, got '{item}'.")
+        name, path = item.split("=", 1)
+        out[name.strip()] = resolve_path(root, path.strip(), None)
+    return out
 
 
 def config_from_args(args: argparse.Namespace) -> RunConfig:
@@ -90,6 +108,9 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         runs_dir=resolve_path(root, None, "runs_dir"),
         probability_source=args.probability_source,
         probabilities_dir=resolve_path(root, args.probabilities_dir, None),
+        calibration=resolve_path(root, args.calibration, None),
+        ensemble=resolve_path(root, args.ensemble, None),
+        member_maps=_parse_member_maps(root, args.member_maps),
         synthetic_pattern=args.synthetic_pattern,
         synthetic_downsample=args.synthetic_downsample,
         synthetic_mask_pattern=args.synthetic_mask_pattern,
