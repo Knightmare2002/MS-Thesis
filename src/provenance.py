@@ -203,6 +203,16 @@ def save_resolved_run_config(
                 transfer_metadata.get("initialized_model_sha256")
             )
 
+    elif run_cfg["model"].get("hub_checkpoint"):
+        # build_model() calls smp.from_pretrained(hub_checkpoint): encoder + decoder
+        # come from the hub checkpoint, only the segmentation head is re-initialised;
+        # encoder_weights is ignored in this branch.
+        hub = str(run_cfg["model"]["hub_checkpoint"])
+        run_cfg["model"]["effective_initialization"] = (
+            f"hub_checkpoint={hub} (encoder+decoder pretrained, segmentation_head re-initialised)"
+        )
+        run_cfg["model"]["effective_checkpoint"] = hub
+        run_cfg["model"]["model_factory_encoder_weights"] = None
     else:
         run_cfg["model"]["effective_initialization"] = (
             f"model_factory_encoder_weights={run_cfg['model'].get('encoder_weights')}"

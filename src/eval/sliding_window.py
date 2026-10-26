@@ -122,6 +122,54 @@ def predict_sliding_window(
     probability_map = probability_sum / weight_sum.clamp_min(1e-8)
     return probability_map[0, 0, :original_height, :original_width].cpu()
 
+
+def tta_variants(tta) -> tuple[tuple[float, ...], tuple[tuple[int, ...], ...]]:
+    """Parse a TTA spec ``{hflip: bool, vflip: bool, scales: [..]}`` (None -> identity)."""
+    tta = dict(tta or {})
+    scales = tuple(float(s) for s in (tta.get("scales") or (1.0,)))
+    if any(s <= 0 for s in scales):
+        raise ValueError(f"TTA scales must be positive, got {scales}.")
+    flips: list[tuple[int, ...]] = [()]
+    if bool(tta.get("hflip", False)):
+        flips.append((3,))
+    if bool(tta.get("vflip", False)):
+        flips.append((2,))
+    return scales, tuple(flips)
+
+
+def tta_probabilities(model, batch: torch.Tensor, n_classes: int, tta=None, size_multiple: int = 32) -> torch.Tensor:
+    """Mean sigmoid probability of `model` over flips x scales of a patch batch [B,3,h,w].
+
+    Each view is mapped back to the original patch geometry (flip undone, logits
+    resized bilinearly) *before* the sigmoid average, so the result has the same
+    meaning as a single forward pass. Scaled sizes are rounded to `size_multiple`
+    (encoder stride). With tta=None this is exactly sigmoid(model(batch)).
+    """
+    scales, flips = tta_variants(tta)
+    height, width = batch.shape[-2:]
+    total, n_views = None, 0
+    for scale in scales:
+        if scale == 1.0:
+            x = batch
+        else:
+            size = tuple(max(size_multiple, int(round(d * scale / size_multiple)) * size_multiple)
+                         for d in (height, width))
+            x = F.interpolate(batch, size=size, mode="bilinear", align_corners=False)
+        for dims in flips:
+            logits = model(x.flip(dims) if dims else x)
+            if logits.shape[1] != n_classes:
+                raise ValueError(f"Model emits {logits.shape[1]} channels but n_classes={n_classes}.")
+            logits = logits.float()
+            if dims:
+                logits = logits.flip(dims)
+            if logits.shape[-2:] != (height, width):
+                logits = F.interpolate(logits, size=(height, width), mode="bilinear", align_corners=False)
+            p = torch.sigmoid(logits)
+            total = p if total is None else total + p
+            n_views += 1
+    return total / n_views
+
+
 @torch.no_grad()
 def predict_sliding_window_multilabel(
     model,
@@ -134,8 +182,12 @@ def predict_sliding_window_multilabel(
     std: tuple[float, float, float],
     n_classes: int,
     blend_mode: str = "gaussian",
+    tta=None,
 ) -> torch.Tensor:
     """Return a full-resolution multilabel probability map [C,H,W].
+
+    `tta` (optional, e.g. ``{"hflip": True, "scales": [0.75, 1.0, 1.25]}``) averages
+    the per-patch probabilities over flips x scales (see `tta_probabilities`).
 
     Same geometry, padding and Gaussian fusion as `predict_sliding_window`: only
     the accumulators carry C channels, and the sigmoid is applied per channel
@@ -180,14 +232,7 @@ def predict_sliding_window_multilabel(
         ]
 
         batch = torch.stack(patches, dim=0).to(device, non_blocking=True)
-        logits = model(batch)
-
-        if logits.shape[1] != n_classes:
-            raise ValueError(
-                f"Model emits {logits.shape[1]} channels but n_classes={n_classes}."
-            )
-
-        probabilities = torch.sigmoid(logits.float())
+        probabilities = tta_probabilities(model, batch, n_classes, tta)
 
         for probability, (top, left) in zip(probabilities, batch_coordinates):
             probability_sum[:, :, top : top + patch_size, left : left + patch_size] += (

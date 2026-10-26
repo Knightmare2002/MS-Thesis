@@ -25,7 +25,8 @@ def build_model(cfg) -> nn.Module:
     # only the segmentation head is re-initialised to cfg.classes channels.
     hub = cfg.get("hub_checkpoint")
     if hub:
-        return smp.from_pretrained(str(hub), classes=int(cfg.classes), strict=False)
+        model = smp.from_pretrained(str(hub), classes=int(cfg.classes), strict=False)
+        return set_drop_path(model, float(cfg.get("drop_path_rate", 0.0) or 0.0))
     arch = str(cfg.arch).lower()
     if arch not in ARCHITECTURES:
         raise KeyError(f"Unknown arch '{arch}'. Available: {sorted(ARCHITECTURES)}")
@@ -44,7 +45,30 @@ def build_model(cfg) -> nn.Module:
             raise ValueError(f"decoder_attention_type is not supported by arch '{arch}'.")
         kwargs["decoder_attention_type"] = str(attention)
 
-    return ARCHITECTURES[arch](**kwargs)
+    return set_drop_path(ARCHITECTURES[arch](**kwargs), float(cfg.get("drop_path_rate", 0.0) or 0.0))
+
+
+def set_drop_path(model: nn.Module, rate: float) -> nn.Module:
+    """Stochastic depth on the residual blocks of a timm encoder (e.g. ConvNeXt).
+
+    Every module owning a `drop_path` attribute (timm ConvNeXt/Swin/ViT blocks) gets
+    `DropPath(rate * i / (N - 1))`, i = block index in forward order: the linear
+    schedule of the official recipes. Active only in train() mode, so inference and
+    checkpoints are unaffected. rate = 0 leaves the model untouched.
+    """
+    if rate <= 0.0:
+        return model
+    if rate >= 1.0:
+        raise ValueError("model.drop_path_rate must be in [0, 1).")
+    from timm.layers import DropPath
+
+    blocks = [m for m in model.encoder.modules() if hasattr(m, "drop_path") and isinstance(m.drop_path, nn.Module)]
+    if not blocks:
+        raise ValueError(f"model.drop_path_rate={rate}: the encoder has no timm residual blocks with drop_path.")
+    for i, block in enumerate(blocks):
+        block.drop_path = DropPath(rate * i / max(len(blocks) - 1, 1))
+    print(f"[model] drop_path linear 0 -> {rate} on {len(blocks)} encoder blocks")
+    return model
 
 
 def count_parameters(model: nn.Module) -> tuple[int, int]:

@@ -193,9 +193,11 @@ def build_predictor(cfg, run_dir: Path, checkpoint_name: str | None, device):
             blend_mode=str(patch_cfg.blend_mode),
         )
         if is_multitask:
+            if patch_cfg.get("tta"):
+                raise NotImplementedError("TTA is implemented for single-head P1ML runs only.")
             _, multilabel = predict_sliding_window_multitask(**kwargs)
             return multilabel.numpy()
-        return predict_sliding_window_multilabel(**kwargs).numpy()
+        return predict_sliding_window_multilabel(**kwargs, tta=patch_cfg.get("tta")).numpy()
 
     return predict, checkpoint_path, checkpoint, family
 

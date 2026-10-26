@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 import torch
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LambdaLR, LinearLR, SequentialLR
+from torch.optim.swa_utils import AveragedModel
 from tqdm.auto import tqdm
 
 import hashlib
@@ -29,7 +30,7 @@ from .utils import ensure_dir
 # Single epoch
 # --------------------------------------------------------------------------- #
 def train_one_epoch(
-    model, loader, criterion, optimizer, scaler, device, accumulation_steps: int = 1
+    model, loader, criterion, optimizer, scaler, device, accumulation_steps: int = 1, ema=None
 ) -> float:
     """Run one training epoch and return the mean loss."""
     model.train()
@@ -50,6 +51,8 @@ def train_one_epoch(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update_parameters(model)
 
         total_loss += loss.item() * accumulation_steps
         n_batches += 1
@@ -79,13 +82,22 @@ def evaluate(model, loader, criterion, device, threshold: float = 0.5) -> dict[s
 # --------------------------------------------------------------------------- #
 # Checkpointing
 # --------------------------------------------------------------------------- #
-def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int, best_dice: float, epochs_without_improvement: int = 0) -> None:
-    """Persist everything needed to resume training bit-for-bit."""
+def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int, best_dice: float, epochs_without_improvement: int = 0, ema=None) -> None:
+    """Persist everything needed to resume training bit-for-bit.
+
+    With EMA, "model" holds the EMA weights (the ones validated and used by every
+    downstream script) and "model_raw" the optimised weights needed to resume.
+    """
+    extra = {}
+    if ema is not None:
+        extra = {"model_raw": model.state_dict(), "ema_n_averaged": int(ema.n_averaged.item()),
+                 "weights": "ema"}
     torch.save(
         {
+            **extra,
             "epoch": epoch,
             "best_dice": best_dice,
-            "model": model.state_dict(),
+            "model": (ema.module if ema is not None else model).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
@@ -238,6 +250,121 @@ def initialize_model_from_checkpoint(
 # --------------------------------------------------------------------------- #
 # Full training run
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# Optimizer / scheduler / EMA factories (T12 follow-ups; defaults = original)
+# --------------------------------------------------------------------------- #
+def convnext_layer_id(name: str, n_layers: int = 12) -> int:
+    """Layer index of a timm ConvNeXt parameter (official ConvNeXt layer-decay rule).
+
+    stem -> 0; stage 0/1 -> 1/2; stage 2 -> 3 + block // 3; stage 3 -> n_layers;
+    downsample of stage k (inside `stages_k` in timm) -> like the official
+    `downsample_layers.k`. Non-encoder parameters (decoder, head) -> n_layers + 1.
+    """
+    if not name.startswith("encoder."):
+        return n_layers + 1
+    parts = name.split(".")
+    stem = next((p for p in parts if p.startswith("stem")), None)
+    stage = next((p for p in parts if p.startswith("stages_") or p == "stages"), None)
+    if stem is not None:
+        return 0
+    if stage is None:
+        return n_layers  # e.g. final norm
+    idx = parts.index(stage)
+    stage_id = int(stage.split("_")[1]) if "_" in stage else int(parts[idx + 1])
+    tail = parts[idx + 1:] if "_" in stage else parts[idx + 2:]
+    if tail and tail[0] == "downsample":
+        return {0: 0, 1: 2, 2: 3}.get(stage_id, n_layers)
+    block_id = int(tail[1]) if len(tail) > 1 and tail[0] == "blocks" else 0
+    if stage_id in (0, 1):
+        return stage_id + 1
+    if stage_id == 2:
+        return 3 + block_id // 3
+    return n_layers
+
+
+def build_optimizer(model, cfg) -> torch.optim.Optimizer:
+    """AdamW with optional layer-wise LR decay, head LR multiplier and no-WD on 1-D params.
+
+    `train.optimizer` (all optional; absent -> one group, identical to the
+    original `AdamW(model.parameters(), lr, weight_decay)`):
+      layer_decay   : float, e.g. 0.9 (ConvNeXt encoders only)
+      head_lr_mult  : float, LR multiplier of `segmentation_head.*`
+      no_weight_decay_1d : bool, no weight decay on biases / norms / layer-scale
+    """
+    lr, wd = float(cfg.train.lr), float(cfg.train.weight_decay)
+    ocfg = dict(cfg.train.get("optimizer") or {})
+    layer_decay = float(ocfg.get("layer_decay", 1.0))
+    head_mult = float(ocfg.get("head_lr_mult", 1.0))
+    no_wd_1d = bool(ocfg.get("no_weight_decay_1d", False))
+    if layer_decay == 1.0 and head_mult == 1.0 and not no_wd_1d:
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    if layer_decay != 1.0 and "convnext" not in str(cfg.model.encoder).lower():
+        raise ValueError("train.optimizer.layer_decay is implemented for ConvNeXt encoders only.")
+
+    n_layers = 12
+    groups: dict[tuple[float, float], list] = {}
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        scale = layer_decay ** (n_layers + 1 - convnext_layer_id(name, n_layers))
+        if name.startswith("segmentation_head."):
+            scale *= head_mult
+        decay = 0.0 if (no_wd_1d and param.ndim <= 1) else wd
+        groups.setdefault((round(scale, 8), decay), []).append(param)
+    param_groups = [{"params": ps, "lr": lr * sc, "weight_decay": d, "lr_scale": sc}
+                    for (sc, d), ps in sorted(groups.items())]
+    scales = sorted({g["lr_scale"] for g in param_groups})
+    print(f"[optimizer] AdamW, {len(param_groups)} groups, lr scale {scales[0]:.3f}..{scales[-1]:.3f}, "
+          f"wd {wd} (1-D params {'0' if no_wd_1d else wd})")
+    return torch.optim.AdamW(param_groups, lr=lr, weight_decay=wd)
+
+
+def build_scheduler(optimizer, cfg):
+    """`train.scheduler.name`: "cosine_restarts" (default, original SGDR) or "constant"."""
+    sch = cfg.train.scheduler
+    name = str(sch.get("name", "cosine_restarts"))
+    if name == "constant":
+        main = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
+    elif name == "cosine_restarts":
+        main = CosineAnnealingWarmRestarts(optimizer, T_0=sch.t_0, T_mult=sch.t_mult, eta_min=sch.eta_min)
+    else:
+        raise ValueError(f"Unknown train.scheduler.name '{name}'.")
+
+    warmup_epochs = int(cfg.train.get("warmup_epochs", 0))
+    warmup_start_factor = float(cfg.train.get("warmup_start_factor", 1.0))
+    if warmup_epochs <= 0:
+        return main
+    if not 0.0 < warmup_start_factor <= 1.0:
+        raise ValueError("train.warmup_start_factor must be in (0, 1].")
+    warmup = LinearLR(optimizer, start_factor=warmup_start_factor, end_factor=1.0, total_iters=warmup_epochs)
+    print(f"[scheduler] linear warm-up for {warmup_epochs} epochs: "
+          f"{warmup_start_factor:.3f} × lr -> 1.000 × lr, then {name}")
+    return SequentialLR(optimizer, schedulers=[warmup, main], milestones=[warmup_epochs])
+
+
+def build_ema(model, cfg):
+    """`train.ema: {enabled, decay, warmup}` -> AveragedModel (EMA of params and buffers) or None.
+
+    Effective decay min(decay, (1 + n) / (warmup + n)), n = optimizer steps, so the
+    average is not dominated by the initial weights in short fine-tunings.
+    """
+    ecfg = dict(cfg.train.get("ema") or {})
+    if not bool(ecfg.get("enabled", False)):
+        return None
+    decay, warmup = float(ecfg.get("decay", 0.999)), float(ecfg.get("warmup", 10.0))
+    if not 0.0 < decay < 1.0:
+        raise ValueError("train.ema.decay must be in (0, 1).")
+
+    def ema_avg(averaged, current, num_averaged):
+        n = float(num_averaged)
+        d = min(decay, (1.0 + n) / (warmup + n))
+        return averaged * d + current * (1.0 - d)
+
+    print(f"[ema] enabled: decay {decay}, warm-up {warmup}; validation and best.pt use EMA weights")
+    return AveragedModel(model, avg_fn=ema_avg, use_buffers=True)
+
+
 def fit(
     model,
     train_loader,
@@ -265,49 +392,21 @@ def fit(
     # Otherwise Adam moment tensors restored from a checkpoint can remain on CPU
     model.to(device)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay
-    )
-    # Warm restarts: the LR is annealed to eta_min over t_0 epochs, then reset;
-    # each cycle is t_mult times longer. Helps escape the flat regions typical of
-    # highly imbalanced dense tasks.
-    cosine_scheduler = CosineAnnealingWarmRestarts(
-        optimizer,
-        T_0=cfg.train.scheduler.t_0,
-        T_mult=cfg.train.scheduler.t_mult,
-        eta_min=cfg.train.scheduler.eta_min,
-    )
-
-    warmup_epochs = int(cfg.train.get("warmup_epochs", 0))
-    warmup_start_factor = float(cfg.train.get("warmup_start_factor", 1.0))
-
-    if warmup_epochs > 0:
-        if not 0.0 < warmup_start_factor <= 1.0:
-            raise ValueError("train.warmup_start_factor must be in (0, 1].")
-
-        warmup_scheduler = LinearLR(
-            optimizer,
-            start_factor=warmup_start_factor,
-            end_factor=1.0,
-            total_iters=warmup_epochs,
-        )
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_epochs],
-        )
-        print(
-            f"[scheduler] linear warm-up for {warmup_epochs} epochs: "
-            f"{warmup_start_factor:.3f} × lr -> 1.000 × lr"
-        )
-    else:
-        scheduler = cosine_scheduler
+    optimizer = build_optimizer(model, cfg)
+    scheduler = build_scheduler(optimizer, cfg)
+    ema = build_ema(model, cfg)
 
     scaler = torch.amp.GradScaler(enabled=bool(cfg.train.amp) and device.type == "cuda")
 
     start_epoch, best_dice, epochs_without_improvement = 0, -1.0, 0
     if cfg.train.get("resume") and last_path.exists():
         checkpoint = load_checkpoint(last_path, model, optimizer, scheduler, scaler, device)
+        if ema is not None:
+            if "model_raw" not in checkpoint:
+                raise RuntimeError(f"{last_path} has no EMA state: cannot resume with train.ema.enabled=true.")
+            ema.module.load_state_dict(checkpoint["model"])
+            model.load_state_dict(checkpoint["model_raw"])
+            ema.n_averaged.fill_(int(checkpoint.get("ema_n_averaged", 0)))
         start_epoch, best_dice = checkpoint["epoch"] + 1, checkpoint["best_dice"]
         epochs_without_improvement = checkpoint.get("epochs_without_improvement", 0)
         print(f"[fit] resumed from {last_path} at epoch {start_epoch} (best dice {best_dice:.4f})")
@@ -319,9 +418,10 @@ def fit(
         current_lr = optimizer.param_groups[0]["lr"]
         train_loss = train_one_epoch(
             model, train_loader, criterion, optimizer, scaler, device,
-            accumulation_steps=cfg.train.accumulation_steps,
+            accumulation_steps=cfg.train.accumulation_steps, ema=ema,
         )
-        val_metrics = evaluate_fn(model, val_loader, criterion, device, threshold=cfg.eval.threshold)
+        eval_model = ema.module if ema is not None else model
+        val_metrics = evaluate_fn(eval_model, val_loader, criterion, device, threshold=cfg.eval.threshold)
         scheduler.step()  # per-epoch stepping matches T_0 expressed in epochs
 
         row = {
@@ -361,10 +461,10 @@ def fit(
             epochs_without_improvement += 1
 
         save_checkpoint(last_path, model, optimizer, scheduler, scaler, epoch, best_dice,
-                        epochs_without_improvement)
+                        epochs_without_improvement, ema=ema)
         if improved:
             save_checkpoint(best_path, model, optimizer, scheduler, scaler, epoch, best_dice,
-                            epochs_without_improvement)
+                            epochs_without_improvement, ema=ema)
             print(f"  -> new best {selection_metric} {best_dice:.4f}, saved {best_path.name}")
         elif epochs_without_improvement >= cfg.train.early_stopping_patience:
             print(f"[fit] early stopping after {epochs_without_improvement} epochs without improvement")

@@ -202,6 +202,7 @@ def _save_class_qualitative_figure(
             std=IMAGENET_STD,
             n_classes=len(UNIFIED_DAMAGE_CLASSES),
             blend_mode=str(patch_cfg.blend_mode),
+            tta=patch_cfg.get("tta"),
         ).numpy()
 
         prediction = (probability[channel] > threshold).astype(np.float32)
@@ -353,6 +354,7 @@ def save_qualitative_figure(
             std=IMAGENET_STD,
             n_classes=n_classes,
             blend_mode=str(patch_cfg.blend_mode),
+            tta=patch_cfg.get("tta"),
         ).numpy()
 
         gt_mask = mask[channel]
@@ -469,6 +471,7 @@ def evaluate_sliding_multilabel(model, samples, cfg, device) -> tuple[pd.DataFra
             std=IMAGENET_STD,
             n_classes=n_classes,
             blend_mode=str(patch_cfg.blend_mode),
+            tta=patch_cfg.get("tta"),
         )
 
         # The blended output is a probability: invert the sigmoid so the meters

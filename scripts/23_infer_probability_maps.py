@@ -330,6 +330,7 @@ def main(argv=None) -> int:
         "normalization": {"mean": list(IMAGENET_MEAN), "std": list(IMAGENET_STD)},
         "downsample": args.downsample, "dtype": args.dtype, "classes": list(DAMAGE_CLASSES),
         "exif_orientation": "ignored (raw sensor frame)",
+        "tta": dict(patch.get("tta") or {}) or None,
     }
     manifest = {"settings": settings, "maps": {}}
     if manifest_path.is_file():
@@ -379,6 +380,7 @@ def main(argv=None) -> int:
             model=model, image=image, device=device, patch_size=int(patch.patch_size),
             stride=stride, batch_size=batch_size, mean=IMAGENET_MEAN, std=IMAGENET_STD,
             n_classes=len(DAMAGE_CLASSES), blend_mode=str(patch.blend_mode),
+            tta=patch.get("tta"),
         )
         stored = downsample(probs, args.downsample)
         tmp = out_dir / f"{cam.stem}.tmp.npz"
