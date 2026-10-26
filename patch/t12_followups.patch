@@ -1,0 +1,610 @@
+diff --git a/scripts/12_evaluate_dacl10k_multilabel_sliding.py b/scripts/12_evaluate_dacl10k_multilabel_sliding.py
+index ffe86ef..a1ba70c 100644
+--- a/scripts/12_evaluate_dacl10k_multilabel_sliding.py
++++ b/scripts/12_evaluate_dacl10k_multilabel_sliding.py
+@@ -202,6 +202,7 @@ def _save_class_qualitative_figure(
+             std=IMAGENET_STD,
+             n_classes=len(UNIFIED_DAMAGE_CLASSES),
+             blend_mode=str(patch_cfg.blend_mode),
++            tta=patch_cfg.get("tta"),
+         ).numpy()
+ 
+         prediction = (probability[channel] > threshold).astype(np.float32)
+@@ -353,6 +354,7 @@ def save_qualitative_figure(
+             std=IMAGENET_STD,
+             n_classes=n_classes,
+             blend_mode=str(patch_cfg.blend_mode),
++            tta=patch_cfg.get("tta"),
+         ).numpy()
+ 
+         gt_mask = mask[channel]
+@@ -469,6 +471,7 @@ def evaluate_sliding_multilabel(model, samples, cfg, device) -> tuple[pd.DataFra
+             std=IMAGENET_STD,
+             n_classes=n_classes,
+             blend_mode=str(patch_cfg.blend_mode),
++            tta=patch_cfg.get("tta"),
+         )
+ 
+         # The blended output is a probability: invert the sigmoid so the meters
+diff --git a/scripts/17_calibrate_multilabel_thresholds.py b/scripts/17_calibrate_multilabel_thresholds.py
+index b5db112..f08ebda 100644
+--- a/scripts/17_calibrate_multilabel_thresholds.py
++++ b/scripts/17_calibrate_multilabel_thresholds.py
+@@ -193,9 +193,11 @@ def build_predictor(cfg, run_dir: Path, checkpoint_name: str | None, device):
+             blend_mode=str(patch_cfg.blend_mode),
+         )
+         if is_multitask:
++            if patch_cfg.get("tta"):
++                raise NotImplementedError("TTA is implemented for single-head P1ML runs only.")
+             _, multilabel = predict_sliding_window_multitask(**kwargs)
+             return multilabel.numpy()
+-        return predict_sliding_window_multilabel(**kwargs).numpy()
++        return predict_sliding_window_multilabel(**kwargs, tta=patch_cfg.get("tta")).numpy()
+ 
+     return predict, checkpoint_path, checkpoint, family
+ 
+diff --git a/scripts/23_infer_probability_maps.py b/scripts/23_infer_probability_maps.py
+index daad586..f73dacb 100644
+--- a/scripts/23_infer_probability_maps.py
++++ b/scripts/23_infer_probability_maps.py
+@@ -330,6 +330,7 @@ def main(argv=None) -> int:
+         "normalization": {"mean": list(IMAGENET_MEAN), "std": list(IMAGENET_STD)},
+         "downsample": args.downsample, "dtype": args.dtype, "classes": list(DAMAGE_CLASSES),
+         "exif_orientation": "ignored (raw sensor frame)",
++        "tta": dict(patch.get("tta") or {}) or None,
+     }
+     manifest = {"settings": settings, "maps": {}}
+     if manifest_path.is_file():
+@@ -379,6 +380,7 @@ def main(argv=None) -> int:
+             model=model, image=image, device=device, patch_size=int(patch.patch_size),
+             stride=stride, batch_size=batch_size, mean=IMAGENET_MEAN, std=IMAGENET_STD,
+             n_classes=len(DAMAGE_CLASSES), blend_mode=str(patch.blend_mode),
++            tta=patch.get("tta"),
+         )
+         stored = downsample(probs, args.downsample)
+         tmp = out_dir / f"{cam.stem}.tmp.npz"
+diff --git a/scripts/29_make_tta_run.py b/scripts/29_make_tta_run.py
+new file mode 100644
+index 0000000..95158fb
+--- /dev/null
++++ b/scripts/29_make_tta_run.py
+@@ -0,0 +1,118 @@
++"""Create a test-time-augmentation (TTA) view of an existing P1ML run.
++
++Every evaluation script (12, 17, 20, 25, 27, 28, 23) reads `<run>/config.yaml`
++and `<run>/best.pt` and writes its outputs inside the run directory. To compare
++TTA with plain inference without overwriting anything, this script creates a
++sibling run directory
++
++    outputs/runs/<run>_tta_<tag>/
++        config.yaml          copy of the source config + data.p1ml_patch.tta
++        best.pt              hard link (same volume) or copy of the source checkpoint
++        class_weights.json   copied when present (informational)
++        dataset_summary.json copied when present (informational)
++        tta_source.json      provenance: source run, checkpoint SHA-256, TTA spec
++
++The weights are unchanged (same SHA-256): TTA only changes inference, i.e. the
++probability maps, hence thresholds (17), curves (25) and Platt parameters (27)
++must be recomputed on the new directory.
++
++    python scripts/29_make_tta_run.py --run-dir outputs/runs/p1ml_t12_upernet_convnext_base_512_ade20k --hflip --scales 0.75 1.0 1.25
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import os
++import shutil
++import sys
++from pathlib import Path
++
++import yaml
++
++REPO_ROOT = Path(__file__).resolve().parents[1]
++if str(REPO_ROOT) not in sys.path:
++    sys.path.insert(0, str(REPO_ROOT))
++
++from src.eval.sliding_window import tta_variants  # noqa: E402
++
++
++def parse_args(argv=None) -> argparse.Namespace:
++    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    p.add_argument("--run-dir", required=True, type=Path)
++    p.add_argument("--checkpoint", default="best.pt")
++    p.add_argument("--hflip", action="store_true", help="add the horizontally flipped view")
++    p.add_argument("--vflip", action="store_true", help="add the vertically flipped view (not recommended: "
++                                                        "bridge photos have a gravity direction)")
++    p.add_argument("--scales", type=float, nargs="+", default=[1.0], help="patch rescaling factors, e.g. 0.75 1.0 1.25")
++    p.add_argument("--tag", default=None, help="suffix of the new run (default derived from the TTA spec)")
++    p.add_argument("--copy", action="store_true", help="copy best.pt instead of hard-linking it")
++    return p.parse_args(argv)
++
++
++def sha256_file(path: Path) -> str:
++    h = hashlib.sha256()
++    with open(path, "rb") as fh:
++        for chunk in iter(lambda: fh.read(1 << 20), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def main(argv=None) -> int:
++    args = parse_args(argv)
++    src = args.run_dir.resolve()
++    ckpt = src / args.checkpoint
++    if not (src / "config.yaml").is_file() or not ckpt.is_file():
++        raise SystemExit(f"{src} must contain config.yaml and {args.checkpoint}.")
++
++    tta = {"hflip": bool(args.hflip), "vflip": bool(args.vflip), "scales": [float(s) for s in args.scales]}
++    scales, flips = tta_variants(tta)
++    n_views = len(scales) * len(flips)
++    if n_views == 1:
++        raise SystemExit("The TTA spec has a single view: add --hflip and/or more --scales.")
++    tag = args.tag or ("h" if args.hflip else "") + ("v" if args.vflip else "") + (
++        "s" + "-".join(f"{s:g}" for s in scales) if scales != (1.0,) else "")
++    dst = src.parent / f"{src.name}_tta_{tag}"
++    if dst.exists():
++        raise SystemExit(f"{dst} already exists: delete it or pass another --tag.")
++
++    with open(src / "config.yaml", "r", encoding="utf-8") as fh:
++        cfg = yaml.safe_load(fh)
++    if cfg["data"].get("p1ml_patch") is None:
++        raise SystemExit("TTA is implemented for single-head P1ML runs (data.p1ml_patch) only.")
++    cfg["data"]["p1ml_patch"]["tta"] = tta
++    cfg.setdefault("model", {})["tta_source_run"] = src.name
++
++    dst.mkdir(parents=True)
++    with open(dst / "config.yaml", "w", encoding="utf-8") as fh:
++        yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True)
++    target = dst / args.checkpoint
++    linked = False
++    if not args.copy:
++        try:
++            os.link(ckpt, target)
++            linked = True
++        except OSError:
++            pass
++    if not linked:
++        shutil.copy2(ckpt, target)
++    for name in ("class_weights.json", "dataset_summary.json"):
++        if (src / name).is_file():
++            shutil.copy2(src / name, dst / name)
++
++    provenance = {"source_run": src.name, "source_checkpoint": str(ckpt), "checkpoint": args.checkpoint,
++                  "checkpoint_sha256": sha256_file(target), "checkpoint_link": "hardlink" if linked else "copy",
++                  "tta": tta, "n_views_per_patch": n_views,
++                  "note": "same weights as the source run; probabilities, thresholds and Platt "
++                          "parameters must be recomputed (scripts 12, 17, 25, 27)."}
++    with open(dst / "tta_source.json", "w", encoding="utf-8") as fh:
++        json.dump(provenance, fh, indent=2)
++
++    print(f"[tta] {dst} created ({n_views} views/patch, checkpoint {'hard-linked' if linked else 'copied'})")
++    print(f"[tta] next: scripts 12 -> 17 -> 25 -> 27 with --run-dir {dst}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/src/engine.py b/src/engine.py
+index 4ba14ba..75498b9 100644
+--- a/src/engine.py
++++ b/src/engine.py
+@@ -15,7 +15,8 @@ import time
+ from pathlib import Path
+ 
+ import torch
+-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LinearLR, SequentialLR
++from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LambdaLR, LinearLR, SequentialLR
++from torch.optim.swa_utils import AveragedModel
+ from tqdm.auto import tqdm
+ 
+ import hashlib
+@@ -29,7 +30,7 @@ from .utils import ensure_dir
+ # Single epoch
+ # --------------------------------------------------------------------------- #
+ def train_one_epoch(
+-    model, loader, criterion, optimizer, scaler, device, accumulation_steps: int = 1
++    model, loader, criterion, optimizer, scaler, device, accumulation_steps: int = 1, ema=None
+ ) -> float:
+     """Run one training epoch and return the mean loss."""
+     model.train()
+@@ -50,6 +51,8 @@ def train_one_epoch(
+             scaler.step(optimizer)
+             scaler.update()
+             optimizer.zero_grad(set_to_none=True)
++            if ema is not None:
++                ema.update_parameters(model)
+ 
+         total_loss += loss.item() * accumulation_steps
+         n_batches += 1
+@@ -79,13 +82,22 @@ def evaluate(model, loader, criterion, device, threshold: float = 0.5) -> dict[s
+ # --------------------------------------------------------------------------- #
+ # Checkpointing
+ # --------------------------------------------------------------------------- #
+-def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int, best_dice: float, epochs_without_improvement: int = 0) -> None:
+-    """Persist everything needed to resume training bit-for-bit."""
++def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, epoch: int, best_dice: float, epochs_without_improvement: int = 0, ema=None) -> None:
++    """Persist everything needed to resume training bit-for-bit.
++
++    With EMA, "model" holds the EMA weights (the ones validated and used by every
++    downstream script) and "model_raw" the optimised weights needed to resume.
++    """
++    extra = {}
++    if ema is not None:
++        extra = {"model_raw": model.state_dict(), "ema_n_averaged": int(ema.n_averaged.item()),
++                 "weights": "ema"}
+     torch.save(
+         {
++            **extra,
+             "epoch": epoch,
+             "best_dice": best_dice,
+-            "model": model.state_dict(),
++            "model": (ema.module if ema is not None else model).state_dict(),
+             "optimizer": optimizer.state_dict(),
+             "scheduler": scheduler.state_dict(),
+             "scaler": scaler.state_dict(),
+@@ -238,6 +250,121 @@ def initialize_model_from_checkpoint(
+ # --------------------------------------------------------------------------- #
+ # Full training run
+ # --------------------------------------------------------------------------- #
++
++# --------------------------------------------------------------------------- #
++# Optimizer / scheduler / EMA factories (T12 follow-ups; defaults = original)
++# --------------------------------------------------------------------------- #
++def convnext_layer_id(name: str, n_layers: int = 12) -> int:
++    """Layer index of a timm ConvNeXt parameter (official ConvNeXt layer-decay rule).
++
++    stem -> 0; stage 0/1 -> 1/2; stage 2 -> 3 + block // 3; stage 3 -> n_layers;
++    downsample of stage k (inside `stages_k` in timm) -> like the official
++    `downsample_layers.k`. Non-encoder parameters (decoder, head) -> n_layers + 1.
++    """
++    if not name.startswith("encoder."):
++        return n_layers + 1
++    parts = name.split(".")
++    stem = next((p for p in parts if p.startswith("stem")), None)
++    stage = next((p for p in parts if p.startswith("stages_") or p == "stages"), None)
++    if stem is not None:
++        return 0
++    if stage is None:
++        return n_layers  # e.g. final norm
++    idx = parts.index(stage)
++    stage_id = int(stage.split("_")[1]) if "_" in stage else int(parts[idx + 1])
++    tail = parts[idx + 1:] if "_" in stage else parts[idx + 2:]
++    if tail and tail[0] == "downsample":
++        return {0: 0, 1: 2, 2: 3}.get(stage_id, n_layers)
++    block_id = int(tail[1]) if len(tail) > 1 and tail[0] == "blocks" else 0
++    if stage_id in (0, 1):
++        return stage_id + 1
++    if stage_id == 2:
++        return 3 + block_id // 3
++    return n_layers
++
++
++def build_optimizer(model, cfg) -> torch.optim.Optimizer:
++    """AdamW with optional layer-wise LR decay, head LR multiplier and no-WD on 1-D params.
++
++    `train.optimizer` (all optional; absent -> one group, identical to the
++    original `AdamW(model.parameters(), lr, weight_decay)`):
++      layer_decay   : float, e.g. 0.9 (ConvNeXt encoders only)
++      head_lr_mult  : float, LR multiplier of `segmentation_head.*`
++      no_weight_decay_1d : bool, no weight decay on biases / norms / layer-scale
++    """
++    lr, wd = float(cfg.train.lr), float(cfg.train.weight_decay)
++    ocfg = dict(cfg.train.get("optimizer") or {})
++    layer_decay = float(ocfg.get("layer_decay", 1.0))
++    head_mult = float(ocfg.get("head_lr_mult", 1.0))
++    no_wd_1d = bool(ocfg.get("no_weight_decay_1d", False))
++    if layer_decay == 1.0 and head_mult == 1.0 and not no_wd_1d:
++        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
++    if layer_decay != 1.0 and "convnext" not in str(cfg.model.encoder).lower():
++        raise ValueError("train.optimizer.layer_decay is implemented for ConvNeXt encoders only.")
++
++    n_layers = 12
++    groups: dict[tuple[float, float], list] = {}
++    for name, param in model.named_parameters():
++        if not param.requires_grad:
++            continue
++        scale = layer_decay ** (n_layers + 1 - convnext_layer_id(name, n_layers))
++        if name.startswith("segmentation_head."):
++            scale *= head_mult
++        decay = 0.0 if (no_wd_1d and param.ndim <= 1) else wd
++        groups.setdefault((round(scale, 8), decay), []).append(param)
++    param_groups = [{"params": ps, "lr": lr * sc, "weight_decay": d, "lr_scale": sc}
++                    for (sc, d), ps in sorted(groups.items())]
++    scales = sorted({g["lr_scale"] for g in param_groups})
++    print(f"[optimizer] AdamW, {len(param_groups)} groups, lr scale {scales[0]:.3f}..{scales[-1]:.3f}, "
++          f"wd {wd} (1-D params {'0' if no_wd_1d else wd})")
++    return torch.optim.AdamW(param_groups, lr=lr, weight_decay=wd)
++
++
++def build_scheduler(optimizer, cfg):
++    """`train.scheduler.name`: "cosine_restarts" (default, original SGDR) or "constant"."""
++    sch = cfg.train.scheduler
++    name = str(sch.get("name", "cosine_restarts"))
++    if name == "constant":
++        main = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
++    elif name == "cosine_restarts":
++        main = CosineAnnealingWarmRestarts(optimizer, T_0=sch.t_0, T_mult=sch.t_mult, eta_min=sch.eta_min)
++    else:
++        raise ValueError(f"Unknown train.scheduler.name '{name}'.")
++
++    warmup_epochs = int(cfg.train.get("warmup_epochs", 0))
++    warmup_start_factor = float(cfg.train.get("warmup_start_factor", 1.0))
++    if warmup_epochs <= 0:
++        return main
++    if not 0.0 < warmup_start_factor <= 1.0:
++        raise ValueError("train.warmup_start_factor must be in (0, 1].")
++    warmup = LinearLR(optimizer, start_factor=warmup_start_factor, end_factor=1.0, total_iters=warmup_epochs)
++    print(f"[scheduler] linear warm-up for {warmup_epochs} epochs: "
++          f"{warmup_start_factor:.3f} × lr -> 1.000 × lr, then {name}")
++    return SequentialLR(optimizer, schedulers=[warmup, main], milestones=[warmup_epochs])
++
++
++def build_ema(model, cfg):
++    """`train.ema: {enabled, decay, warmup}` -> AveragedModel (EMA of params and buffers) or None.
++
++    Effective decay min(decay, (1 + n) / (warmup + n)), n = optimizer steps, so the
++    average is not dominated by the initial weights in short fine-tunings.
++    """
++    ecfg = dict(cfg.train.get("ema") or {})
++    if not bool(ecfg.get("enabled", False)):
++        return None
++    decay, warmup = float(ecfg.get("decay", 0.999)), float(ecfg.get("warmup", 10.0))
++    if not 0.0 < decay < 1.0:
++        raise ValueError("train.ema.decay must be in (0, 1).")
++
++    def ema_avg(averaged, current, num_averaged):
++        n = float(num_averaged)
++        d = min(decay, (1.0 + n) / (warmup + n))
++        return averaged * d + current * (1.0 - d)
++
++    print(f"[ema] enabled: decay {decay}, warm-up {warmup}; validation and best.pt use EMA weights")
++    return AveragedModel(model, avg_fn=ema_avg, use_buffers=True)
++
++
+ def fit(
+     model,
+     train_loader,
+@@ -265,49 +392,21 @@ def fit(
+     # Otherwise Adam moment tensors restored from a checkpoint can remain on CPU
+     model.to(device)
+ 
+-    optimizer = torch.optim.AdamW(
+-        model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay
+-    )
+-    # Warm restarts: the LR is annealed to eta_min over t_0 epochs, then reset;
+-    # each cycle is t_mult times longer. Helps escape the flat regions typical of
+-    # highly imbalanced dense tasks.
+-    cosine_scheduler = CosineAnnealingWarmRestarts(
+-        optimizer,
+-        T_0=cfg.train.scheduler.t_0,
+-        T_mult=cfg.train.scheduler.t_mult,
+-        eta_min=cfg.train.scheduler.eta_min,
+-    )
+-
+-    warmup_epochs = int(cfg.train.get("warmup_epochs", 0))
+-    warmup_start_factor = float(cfg.train.get("warmup_start_factor", 1.0))
+-
+-    if warmup_epochs > 0:
+-        if not 0.0 < warmup_start_factor <= 1.0:
+-            raise ValueError("train.warmup_start_factor must be in (0, 1].")
+-
+-        warmup_scheduler = LinearLR(
+-            optimizer,
+-            start_factor=warmup_start_factor,
+-            end_factor=1.0,
+-            total_iters=warmup_epochs,
+-        )
+-        scheduler = SequentialLR(
+-            optimizer,
+-            schedulers=[warmup_scheduler, cosine_scheduler],
+-            milestones=[warmup_epochs],
+-        )
+-        print(
+-            f"[scheduler] linear warm-up for {warmup_epochs} epochs: "
+-            f"{warmup_start_factor:.3f} × lr -> 1.000 × lr"
+-        )
+-    else:
+-        scheduler = cosine_scheduler
++    optimizer = build_optimizer(model, cfg)
++    scheduler = build_scheduler(optimizer, cfg)
++    ema = build_ema(model, cfg)
+ 
+     scaler = torch.amp.GradScaler(enabled=bool(cfg.train.amp) and device.type == "cuda")
+ 
+     start_epoch, best_dice, epochs_without_improvement = 0, -1.0, 0
+     if cfg.train.get("resume") and last_path.exists():
+         checkpoint = load_checkpoint(last_path, model, optimizer, scheduler, scaler, device)
++        if ema is not None:
++            if "model_raw" not in checkpoint:
++                raise RuntimeError(f"{last_path} has no EMA state: cannot resume with train.ema.enabled=true.")
++            ema.module.load_state_dict(checkpoint["model"])
++            model.load_state_dict(checkpoint["model_raw"])
++            ema.n_averaged.fill_(int(checkpoint.get("ema_n_averaged", 0)))
+         start_epoch, best_dice = checkpoint["epoch"] + 1, checkpoint["best_dice"]
+         epochs_without_improvement = checkpoint.get("epochs_without_improvement", 0)
+         print(f"[fit] resumed from {last_path} at epoch {start_epoch} (best dice {best_dice:.4f})")
+@@ -319,9 +418,10 @@ def fit(
+         current_lr = optimizer.param_groups[0]["lr"]
+         train_loss = train_one_epoch(
+             model, train_loader, criterion, optimizer, scaler, device,
+-            accumulation_steps=cfg.train.accumulation_steps,
++            accumulation_steps=cfg.train.accumulation_steps, ema=ema,
+         )
+-        val_metrics = evaluate_fn(model, val_loader, criterion, device, threshold=cfg.eval.threshold)
++        eval_model = ema.module if ema is not None else model
++        val_metrics = evaluate_fn(eval_model, val_loader, criterion, device, threshold=cfg.eval.threshold)
+         scheduler.step()  # per-epoch stepping matches T_0 expressed in epochs
+ 
+         row = {
+@@ -361,10 +461,10 @@ def fit(
+             epochs_without_improvement += 1
+ 
+         save_checkpoint(last_path, model, optimizer, scheduler, scaler, epoch, best_dice,
+-                        epochs_without_improvement)
++                        epochs_without_improvement, ema=ema)
+         if improved:
+             save_checkpoint(best_path, model, optimizer, scheduler, scaler, epoch, best_dice,
+-                            epochs_without_improvement)
++                            epochs_without_improvement, ema=ema)
+             print(f"  -> new best {selection_metric} {best_dice:.4f}, saved {best_path.name}")
+         elif epochs_without_improvement >= cfg.train.early_stopping_patience:
+             print(f"[fit] early stopping after {epochs_without_improvement} epochs without improvement")
+diff --git a/src/eval/sliding_window.py b/src/eval/sliding_window.py
+index bbb6e1e..a35c690 100644
+--- a/src/eval/sliding_window.py
++++ b/src/eval/sliding_window.py
+@@ -122,6 +122,54 @@ def predict_sliding_window(
+     probability_map = probability_sum / weight_sum.clamp_min(1e-8)
+     return probability_map[0, 0, :original_height, :original_width].cpu()
+ 
++
++def tta_variants(tta) -> tuple[tuple[float, ...], tuple[tuple[int, ...], ...]]:
++    """Parse a TTA spec ``{hflip: bool, vflip: bool, scales: [..]}`` (None -> identity)."""
++    tta = dict(tta or {})
++    scales = tuple(float(s) for s in (tta.get("scales") or (1.0,)))
++    if any(s <= 0 for s in scales):
++        raise ValueError(f"TTA scales must be positive, got {scales}.")
++    flips: list[tuple[int, ...]] = [()]
++    if bool(tta.get("hflip", False)):
++        flips.append((3,))
++    if bool(tta.get("vflip", False)):
++        flips.append((2,))
++    return scales, tuple(flips)
++
++
++def tta_probabilities(model, batch: torch.Tensor, n_classes: int, tta=None, size_multiple: int = 32) -> torch.Tensor:
++    """Mean sigmoid probability of `model` over flips x scales of a patch batch [B,3,h,w].
++
++    Each view is mapped back to the original patch geometry (flip undone, logits
++    resized bilinearly) *before* the sigmoid average, so the result has the same
++    meaning as a single forward pass. Scaled sizes are rounded to `size_multiple`
++    (encoder stride). With tta=None this is exactly sigmoid(model(batch)).
++    """
++    scales, flips = tta_variants(tta)
++    height, width = batch.shape[-2:]
++    total, n_views = None, 0
++    for scale in scales:
++        if scale == 1.0:
++            x = batch
++        else:
++            size = tuple(max(size_multiple, int(round(d * scale / size_multiple)) * size_multiple)
++                         for d in (height, width))
++            x = F.interpolate(batch, size=size, mode="bilinear", align_corners=False)
++        for dims in flips:
++            logits = model(x.flip(dims) if dims else x)
++            if logits.shape[1] != n_classes:
++                raise ValueError(f"Model emits {logits.shape[1]} channels but n_classes={n_classes}.")
++            logits = logits.float()
++            if dims:
++                logits = logits.flip(dims)
++            if logits.shape[-2:] != (height, width):
++                logits = F.interpolate(logits, size=(height, width), mode="bilinear", align_corners=False)
++            p = torch.sigmoid(logits)
++            total = p if total is None else total + p
++            n_views += 1
++    return total / n_views
++
++
+ @torch.no_grad()
+ def predict_sliding_window_multilabel(
+     model,
+@@ -134,9 +182,13 @@ def predict_sliding_window_multilabel(
+     std: tuple[float, float, float],
+     n_classes: int,
+     blend_mode: str = "gaussian",
++    tta=None,
+ ) -> torch.Tensor:
+     """Return a full-resolution multilabel probability map [C,H,W].
+ 
++    `tta` (optional, e.g. ``{"hflip": True, "scales": [0.75, 1.0, 1.25]}``) averages
++    the per-patch probabilities over flips x scales (see `tta_probabilities`).
++
+     Same geometry, padding and Gaussian fusion as `predict_sliding_window`: only
+     the accumulators carry C channels, and the sigmoid is applied per channel
+     (independent classes, never softmax across them).
+@@ -180,14 +232,7 @@ def predict_sliding_window_multilabel(
+         ]
+ 
+         batch = torch.stack(patches, dim=0).to(device, non_blocking=True)
+-        logits = model(batch)
+-
+-        if logits.shape[1] != n_classes:
+-            raise ValueError(
+-                f"Model emits {logits.shape[1]} channels but n_classes={n_classes}."
+-            )
+-
+-        probabilities = torch.sigmoid(logits.float())
++        probabilities = tta_probabilities(model, batch, n_classes, tta)
+ 
+         for probability, (top, left) in zip(probabilities, batch_coordinates):
+             probability_sum[:, :, top : top + patch_size, left : left + patch_size] += (
+diff --git a/src/models/unet.py b/src/models/unet.py
+index 878e3db..8c0a325 100644
+--- a/src/models/unet.py
++++ b/src/models/unet.py
+@@ -25,7 +25,8 @@ def build_model(cfg) -> nn.Module:
+     # only the segmentation head is re-initialised to cfg.classes channels.
+     hub = cfg.get("hub_checkpoint")
+     if hub:
+-        return smp.from_pretrained(str(hub), classes=int(cfg.classes), strict=False)
++        model = smp.from_pretrained(str(hub), classes=int(cfg.classes), strict=False)
++        return set_drop_path(model, float(cfg.get("drop_path_rate", 0.0) or 0.0))
+     arch = str(cfg.arch).lower()
+     if arch not in ARCHITECTURES:
+         raise KeyError(f"Unknown arch '{arch}'. Available: {sorted(ARCHITECTURES)}")
+@@ -44,7 +45,30 @@ def build_model(cfg) -> nn.Module:
+             raise ValueError(f"decoder_attention_type is not supported by arch '{arch}'.")
+         kwargs["decoder_attention_type"] = str(attention)
+ 
+-    return ARCHITECTURES[arch](**kwargs)
++    return set_drop_path(ARCHITECTURES[arch](**kwargs), float(cfg.get("drop_path_rate", 0.0) or 0.0))
++
++
++def set_drop_path(model: nn.Module, rate: float) -> nn.Module:
++    """Stochastic depth on the residual blocks of a timm encoder (e.g. ConvNeXt).
++
++    Every module owning a `drop_path` attribute (timm ConvNeXt/Swin/ViT blocks) gets
++    `DropPath(rate * i / (N - 1))`, i = block index in forward order: the linear
++    schedule of the official recipes. Active only in train() mode, so inference and
++    checkpoints are unaffected. rate = 0 leaves the model untouched.
++    """
++    if rate <= 0.0:
++        return model
++    if rate >= 1.0:
++        raise ValueError("model.drop_path_rate must be in [0, 1).")
++    from timm.layers import DropPath
++
++    blocks = [m for m in model.encoder.modules() if hasattr(m, "drop_path") and isinstance(m.drop_path, nn.Module)]
++    if not blocks:
++        raise ValueError(f"model.drop_path_rate={rate}: the encoder has no timm residual blocks with drop_path.")
++    for i, block in enumerate(blocks):
++        block.drop_path = DropPath(rate * i / max(len(blocks) - 1, 1))
++    print(f"[model] drop_path linear 0 -> {rate} on {len(blocks)} encoder blocks")
++    return model
+ 
+ 
+ def count_parameters(model: nn.Module) -> tuple[int, int]:
+diff --git a/src/provenance.py b/src/provenance.py
+index f1fc625..4e46dd9 100644
+--- a/src/provenance.py
++++ b/src/provenance.py
+@@ -203,6 +203,16 @@ def save_resolved_run_config(
+                 transfer_metadata.get("initialized_model_sha256")
+             )
+ 
++    elif run_cfg["model"].get("hub_checkpoint"):
++        # build_model() calls smp.from_pretrained(hub_checkpoint): encoder + decoder
++        # come from the hub checkpoint, only the segmentation head is re-initialised;
++        # encoder_weights is ignored in this branch.
++        hub = str(run_cfg["model"]["hub_checkpoint"])
++        run_cfg["model"]["effective_initialization"] = (
++            f"hub_checkpoint={hub} (encoder+decoder pretrained, segmentation_head re-initialised)"
++        )
++        run_cfg["model"]["effective_checkpoint"] = hub
++        run_cfg["model"]["model_factory_encoder_weights"] = None
+     else:
+         run_cfg["model"]["effective_initialization"] = (
+             f"model_factory_encoder_weights={run_cfg['model'].get('encoder_weights')}"
