@@ -474,7 +474,22 @@ def fit(
 
 
 def _append_csv(path: Path, row: dict) -> None:
-    """Append one row to a CSV, writing the header on first use."""
+    """Append one row to a CSV, writing the header on first use.
+
+    If the columns changed (e.g. a run resumed after new metrics were added),
+    the file is rewritten with the union of the columns (missing cells empty).
+    """
+    if path.exists():
+        with open(path, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            old_fields, old_rows = list(reader.fieldnames or []), list(reader)
+        if old_fields != list(row):
+            fields = old_fields + [k for k in row if k not in old_fields]
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(old_rows + [row])
+            return
     write_header = not path.exists()
     with open(path, "a", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(row))

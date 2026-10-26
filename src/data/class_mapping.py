@@ -50,6 +50,16 @@ UNIFIED_DAMAGE_CLASSES: list[str] = [
     "surface",        # Weathering, Graffiti, Restformwork
 ]
 
+# Classes the network still predicts (auxiliary channel, weights/thresholds/Platt
+# unchanged) but that are CLOSED for every reported result: excluded from the
+# aggregate metrics (macro/micro/FAR, model selection) and from the 3D pipeline.
+# 2026-10-26, supervisor: delamination (Hollowareas) is not assessable from RGB
+# photographs (it is found by hammer sounding / IR thermography).
+CLOSED_DAMAGE_CLASSES: list[str] = ["delamination"]
+REPORTED_DAMAGE_CLASSES: list[str] = [c for c in UNIFIED_DAMAGE_CLASSES if c not in CLOSED_DAMAGE_CLASSES]
+if set(CLOSED_DAMAGE_CLASSES) - set(UNIFIED_DAMAGE_CLASSES):
+    raise RuntimeError(f"CLOSED_DAMAGE_CLASSES {CLOSED_DAMAGE_CLASSES} not in {UNIFIED_DAMAGE_CLASSES}.")
+
 DACL10K_TO_UNIFIED: dict[str, str] = {
     "Crack": "crack",
     "ACrack": "crack",

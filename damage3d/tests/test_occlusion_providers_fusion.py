@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from damage3d.classes import (DAMAGE_CLASSES, STATE_DAMAGE, STATE_INSUFFICIENT_VIEWS, STATE_NOT_OBSERVED,
+from damage3d.classes import (DAMAGE_CLASSES, MODEL_CHANNELS, MODEL_CLASSES, STATE_DAMAGE, STATE_INSUFFICIENT_VIEWS, STATE_NOT_OBSERVED,
                               STATE_OBSERVED_NO_DAMAGE, class_bit)
 from damage3d.fusion import ChunkAccumulator, fuse, parse_thresholds
 from damage3d.providers import FileProvider, ProbabilityMap, SyntheticProvider, save_probability_npz
@@ -47,7 +47,7 @@ def test_surface_deviation_stats(occ_chunk):
 # ---------------------------------------------------------------- providers
 def test_synthetic_provider_six_overlapping_channels():
     pmap = SyntheticProvider(downsample=4).get("DSC00001", 640, 480)
-    assert pmap.probs.shape == (6, 120, 160) and pmap.probs.dtype == np.float32
+    assert pmap.probs.shape == (5, 120, 160) and pmap.probs.dtype == np.float32
     assert 0.0 <= pmap.probs.min() and pmap.probs.max() <= 1.0
     positive = pmap.probs >= 0.5
     assert positive.any(axis=(1, 2)).all()                  # every class present
@@ -69,25 +69,28 @@ def test_synthetic_mask_provider(tmp_path):
 
 
 def test_file_provider_roundtrip_and_class_order(tmp_path):
-    probs = np.random.default_rng(0).uniform(size=(6, 60, 80)).astype(np.float32)
+    probs = np.random.default_rng(0).uniform(size=(6, 60, 80)).astype(np.float32)   # 6 model channels
     save_probability_npz(tmp_path / "DSC00001.npz", probs, dtype="float32")
     prov = FileProvider(tmp_path)
     assert prov.check_available(["DSC00001", "DSC00002"]) == ["DSC00002"]
-    np.testing.assert_array_equal(prov.get("DSC00001", 640, 480).probs, probs)
-    np.savez(tmp_path / "DSC00003.npz", probs=probs, classes=np.array(DAMAGE_CLASSES[::-1]))
-    with pytest.raises(ValueError, match="class order"):
-        prov.get("DSC00003", 640, 480)
+    np.testing.assert_array_equal(prov.get("DSC00001", 640, 480).probs, probs[list(MODEL_CHANNELS)])
+    # Channels are selected by name: a permuted file gives the same 5 reported maps.
+    np.savez(tmp_path / "DSC00003.npz", probs=probs[::-1], classes=np.array(MODEL_CLASSES[::-1]))
+    np.testing.assert_array_equal(prov.get("DSC00003", 640, 480).probs, probs[list(MODEL_CHANNELS)])
+    np.savez(tmp_path / "DSC00005.npz", probs=probs[:4], classes=np.array(MODEL_CLASSES[:4]))
+    with pytest.raises(ValueError, match="do not provide"):
+        prov.get("DSC00005", 640, 480)
     with pytest.raises(ValueError, match="aspect ratio"):
         prov.get("DSC00001", 640, 640)
     save_probability_npz(tmp_path / "DSC00004.npz", probs, dtype="uint8")
-    np.testing.assert_allclose(prov.get("DSC00004", 640, 480).probs, probs, atol=0.5 / 255 + 1e-7)
+    np.testing.assert_allclose(prov.get("DSC00004", 640, 480).probs, probs[list(MODEL_CHANNELS)], atol=0.5 / 255 + 1e-7)
 
 
 # ---------------------------------------------------------------- sampling
 def _ramp_map(w=8, h=4):
-    probs = np.zeros((6, h, w), np.float32)
+    probs = np.zeros((5, h, w), np.float32)
     xs = np.arange(w, dtype=np.float32)
-    for c in range(6):
+    for c in range(5):
         probs[c] = (xs[None, :] + c) / 20.0
     return ProbabilityMap(probs)
 
@@ -120,20 +123,20 @@ def test_nan_channel_and_valid_mask():
     pmap.valid = np.ones((4, 8), bool)
     pmap.valid[:, 7] = False
     probs, valid = sample_probabilities(pmap, np.array([1.5, 5.5, 7.8]), np.array([1.5, 1.5, 1.5]), 8, 4, "bilinear")
-    assert np.isfinite(probs[0]).all() and np.isnan(probs[1, 2]) and np.isfinite(probs[1, [0, 1, 3, 4, 5]]).all()
+    assert np.isfinite(probs[0]).all() and np.isnan(probs[1, 2]) and np.isfinite(probs[1, [0, 1, 3, 4]]).all()
     assert list(valid) == [True, True, False]
 
 
 # ---------------------------------------------------------------- fusion
 def test_accumulation_mean_counts_votes():
     acc = ChunkAccumulator.zeros(4, n_cameras=2)
-    p1 = np.array([[0.9, 0.8, 0.1, 0.0, 0.0, 0.0], [0.2] * 6], np.float32)
-    p2 = np.array([[0.7, 0.2, np.nan, 0.0, 0.0, 0.0]], np.float32)
+    p1 = np.array([[0.9, 0.8, 0.1, 0.0, 0.0], [0.2] * 5], np.float32)
+    p2 = np.array([[0.7, 0.2, np.nan, 0.0, 0.0]], np.float32)
     acc.add_view(np.array([0, 1]), p1, vote_threshold=0.5)
     acc.add_view(np.array([0]), p2, vote_threshold=0.5)
     assert list(acc.n_views) == [2, 1, 0, 0]
-    assert list(acc.count[0]) == [2, 2, 1, 2, 2, 2]
-    assert list(acc.votes[0]) == [2, 1, 0, 0, 0, 0]
+    assert list(acc.count[0]) == [2, 2, 1, 2, 2]
+    assert list(acc.votes[0]) == [2, 1, 0, 0, 0]
     fused = fuse(acc, parse_thresholds("0.5"), min_views=1)
     assert fused.score[0, 0] == pytest.approx(0.8) and fused.score[0, 1] == pytest.approx(0.5)
     assert np.isnan(fused.score[2]).all()
@@ -142,14 +145,14 @@ def test_accumulation_mean_counts_votes():
 def test_overlapping_classes_and_states():
     acc = ChunkAccumulator.zeros(5, n_cameras=1)
     views = np.array([
-        [0.9, 0.0, 0.0, 0.8, 0.0, 0.0],   # crack + moisture
-        [0.1] * 6,                        # observed, no damage
-        [0.1, 0.1, np.nan, 0.1, 0.1, 0.1],  # class 2 never valid -> insufficient
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.95],  # surface
+        [0.9, 0.0, 0.0, 0.8, 0.0],   # crack + moisture
+        [0.1] * 5,                   # observed, no damage
+        [0.1, 0.1, np.nan, 0.1, 0.1],  # class 2 never valid -> insufficient
+        [0.0, 0.0, 0.0, 0.0, 0.95],  # surface
     ], np.float32)
     acc.add_view(np.array([0, 1, 2, 3]), views, 0.5)
     fused = fuse(acc, parse_thresholds("0.5"), min_views=1)
-    assert fused.labels[0].tolist() == [True, False, False, True, False, False]
+    assert fused.labels[0].tolist() == [True, False, False, True, False]
     assert fused.label_mask[0] == class_bit("crack") | class_bit("moisture")
     assert list(fused.state) == [STATE_DAMAGE, STATE_OBSERVED_NO_DAMAGE, STATE_INSUFFICIENT_VIEWS,
                                  STATE_DAMAGE, STATE_NOT_OBSERVED]
@@ -162,24 +165,24 @@ def test_overlapping_classes_and_states():
 
 def test_dominant_color_uses_threshold_ratio():
     acc = ChunkAccumulator.zeros(1, 1)
-    acc.add_view(np.array([0]), np.array([[0.6, 0.0, 0.0, 0.0, 0.0, 0.9]], np.float32), 0.5)
+    acc.add_view(np.array([0]), np.array([[0.6, 0.0, 0.0, 0.0, 0.9]], np.float32), 0.5)
     thr = parse_thresholds("crack=0.3,surface=0.85")
     fused = fuse(acc, thr, 1)
-    assert fused.labels[0, 0] and fused.labels[0, 5]
+    assert fused.labels[0, 0] and fused.labels[0, 4]
     assert fused.dominant[0] == 0          # 0.6/0.3 = 2.0 > 0.9/0.85
 
 
 def test_parse_thresholds():
-    assert parse_thresholds("0.4").tolist() == pytest.approx([0.4] * 6)
-    thr = parse_thresholds("crack=0.6,surface=0.7")
-    assert thr[0] == pytest.approx(0.6) and thr[5] == pytest.approx(0.7) and thr[1] == pytest.approx(0.5)
+    assert parse_thresholds("0.4").tolist() == pytest.approx([0.4] * 5)
+    thr = parse_thresholds("crack=0.6,delamination=0.2,surface=0.7")   # closed class ignored
+    assert thr[0] == pytest.approx(0.6) and thr[4] == pytest.approx(0.7) and thr[1] == pytest.approx(0.5)
     with pytest.raises(ValueError):
         parse_thresholds("rust=0.5")
 
 
 def test_accumulator_atomic_save(tmp_path):
     acc = ChunkAccumulator.zeros(3, 2)
-    acc.add_view(np.array([1]), np.full((1, 6), 0.7, np.float32), 0.5)
+    acc.add_view(np.array([1]), np.full((1, 5), 0.7, np.float32), 0.5)
     acc.last_batch = 4
     acc.save_atomic(tmp_path / "chunk_000000.npz")
     assert not list(tmp_path.glob("*.tmp"))

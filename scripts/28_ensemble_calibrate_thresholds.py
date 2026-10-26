@@ -55,7 +55,7 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES
+from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, REPORTED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES  # noqa: F401
 from src.eval.probability_calibration import FORMAT_ENSEMBLE, apply_platt, load_platt, sha256_file
 
 CLASSES = list(UNIFIED_DAMAGE_CLASSES)
@@ -201,6 +201,7 @@ def evaluate_source(hist_pos, hist_neg, max_prob, gt_present, halves, thresholds
 def summarize(per_class: pd.DataFrame) -> pd.DataFrame:
     out = []
     for (source, protocol), g in per_class.groupby(["source", "protocol"], sort=False):
+        g = g[~g["class"].isin(CLOSED_DAMAGE_CLASSES)]          # closed classes: per-class rows only
         present = g[g["support"] > 0]
         out.append({"source": source, "protocol": protocol,
                     **{f"macro_{k}_present": present[k].mean() for k in ("dice", "iou", "precision", "recall")},

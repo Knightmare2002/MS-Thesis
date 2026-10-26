@@ -191,8 +191,9 @@ def load_platt(path: Path, classes) -> tuple[np.ndarray, np.ndarray, dict]:
     payload = read_json(path)
     if payload.get("format") != FORMAT_SINGLE:
         raise ValueError(f"{path}: format '{payload.get('format')}' != '{FORMAT_SINGLE}'.")
-    if list(payload.get("classes", [])) != list(classes):
-        raise ValueError(f"{path}: class order {payload.get('classes')} != {list(classes)}.")
+    missing = [c for c in classes if c not in payload.get("classes", [])]
+    if missing:  # selection by name: a 6-class file serves the 5 reported 3D classes
+        raise ValueError(f"{path}: classes {missing} not in {payload.get('classes')}.")
     a, b = params_arrays(payload["params"], classes)
     return a, b, payload
 

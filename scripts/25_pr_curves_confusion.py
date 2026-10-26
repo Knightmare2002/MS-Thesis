@@ -51,7 +51,7 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES
+from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, REPORTED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES  # noqa: F401
 from src.data.dacl10k import list_samples
 from src.eval.postprocess import apply_operating_points
 from src.utils import ensure_dir, get_device, load_config, multilabel_patch_cfg, seed_everything
@@ -278,7 +278,8 @@ def main() -> None:
 
     pd.set_option("display.width", 200)
     summary = ap_table.pivot(index="class", columns="run", values="ap").loc[UNIFIED_DAMAGE_CLASSES]
-    summary.loc["mAP"] = summary.mean()
+    summary.loc["mAP"] = summary.loc[REPORTED_DAMAGE_CLASSES].mean()      # closed classes excluded
+    summary.loc["mAP_all_channels"] = summary.loc[UNIFIED_DAMAGE_CLASSES].mean()
     print("\n--- Average Precision (raw probabilities) ---")
     print(summary.round(3).to_string())
     for label, data in entries:

@@ -5,7 +5,8 @@ Runs a trained P1ML checkpoint on the bridge photos with the same
 sliding-window protocol as 12_evaluate_dacl10k_multilabel_sliding.py
 (native resolution, Gaussian blending, independent sigmoid per channel) and
 writes one ``<stem>.npz`` per photo in the format read by the damage3d
-``files`` provider (keys ``probs`` (6, H', W') and ``classes``).
+``files`` provider (keys ``probs`` (6 model channels, H', W') and ``classes``;
+damage3d and the overlays use the 5 reported classes, delamination closed).
 
 With ``--save-overlays`` it also writes ``<maps dir>/overlays/<stem>_overlay.jpg``
 for visual inspection: the photo, all classes together, and one panel per
@@ -58,7 +59,7 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from damage3d.classes import CLASS_COLORS, DAMAGE_CLASSES  
+from damage3d.classes import CLASS_COLORS, DAMAGE_CLASSES, MODEL_CLASSES 
 from damage3d.fusion import parse_thresholds  
 from damage3d.metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras  
 from damage3d.paths import resolve_path, resolve_project_root  
@@ -249,12 +250,12 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if args.downsample < 1:
         raise SystemExit("--downsample must be >= 1.")
-    if tuple(UNIFIED_DAMAGE_CLASSES) != tuple(DAMAGE_CLASSES):
-        raise SystemExit(f"Class order mismatch: {UNIFIED_DAMAGE_CLASSES} vs {DAMAGE_CLASSES}.")
+    if tuple(UNIFIED_DAMAGE_CLASSES) != tuple(MODEL_CLASSES):
+        raise SystemExit(f"Class order mismatch: {UNIFIED_DAMAGE_CLASSES} vs {MODEL_CLASSES}.")
 
     run_dir = Path(args.run_dir).resolve()
     cfg = load_config(run_dir / "config.yaml")
-    if int(cfg.model.classes) != len(DAMAGE_CLASSES):
+    if int(cfg.model.classes) != len(MODEL_CLASSES):
         raise SystemExit(f"{run_dir.name} emits {cfg.model.classes} channels: not a P1ML multilabel run.")
     checkpoint_path = run_dir / args.checkpoint
     if not checkpoint_path.is_file():
@@ -328,7 +329,7 @@ def main(argv=None) -> int:
         "model": {k: cfg.model.get(k) for k in ("arch", "encoder", "classes", "decoder_attention_type")},
         "patch_size": int(patch.patch_size), "stride": stride, "blend_mode": str(patch.blend_mode),
         "normalization": {"mean": list(IMAGENET_MEAN), "std": list(IMAGENET_STD)},
-        "downsample": args.downsample, "dtype": args.dtype, "classes": list(DAMAGE_CLASSES),
+        "downsample": args.downsample, "dtype": args.dtype, "classes": list(MODEL_CLASSES),
         "exif_orientation": "ignored (raw sensor frame)",
         "tta": dict(patch.get("tta") or {}) or None,
     }
@@ -379,7 +380,7 @@ def main(argv=None) -> int:
         probs = predict_sliding_window_multilabel(
             model=model, image=image, device=device, patch_size=int(patch.patch_size),
             stride=stride, batch_size=batch_size, mean=IMAGENET_MEAN, std=IMAGENET_STD,
-            n_classes=len(DAMAGE_CLASSES), blend_mode=str(patch.blend_mode),
+            n_classes=len(MODEL_CLASSES), blend_mode=str(patch.blend_mode),
             tta=patch.get("tta"),
         )
         stored = downsample(probs, args.downsample)
@@ -390,7 +391,7 @@ def main(argv=None) -> int:
         manifest["maps"][cam.stem] = {
             "position": position, "label": cam.label, "image": found[cam.stem].name,
             "image_size": [calib.width, calib.height], "map_size": [stored.shape[2], stored.shape[1]],
-            "max_prob": [round(float(m), 4) for m in stored.reshape(len(DAMAGE_CLASSES), -1).max(1)],
+            "max_prob": [round(float(m), 4) for m in stored.reshape(len(MODEL_CLASSES), -1).max(1)],
             "seconds": round(seconds, 1),
         }
         manifest["updated_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")

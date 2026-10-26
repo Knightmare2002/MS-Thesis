@@ -6,23 +6,24 @@ import json
 import numpy as np
 import pytest
 
-from damage3d.classes import DAMAGE_CLASSES
+from damage3d.classes import DAMAGE_CLASSES, MODEL_CHANNELS, MODEL_CLASSES
 from damage3d.providers import CalibratedProvider, EnsembleProvider, FileProvider, save_probability_npz
 from src.eval.probability_calibration import (FORMAT_ENSEMBLE, FORMAT_SINGLE, apply_platt, bin_centers,
                                               fit_platt_from_histograms, logit, map_thresholds, sigmoid,
                                               thresholds_from_json)
 
-C = len(DAMAGE_CLASSES)
+C = len(MODEL_CLASSES)          # maps / Platt JSON carry all model channels (as scripts/23, 27, 28)
+K = list(MODEL_CHANNELS)        # providers return the reported classes only (delamination closed)
 
 
 def _params(a, b):
-    return {c: {"a": float(a[i]), "b": float(b[i])} for i, c in enumerate(DAMAGE_CLASSES)}
+    return {c: {"a": float(a[i]), "b": float(b[i])} for i, c in enumerate(MODEL_CLASSES)}
 
 
 def _single_json(path, a, b, thr):
-    path.write_text(json.dumps({"format": FORMAT_SINGLE, "classes": list(DAMAGE_CLASSES), "run_name": "r",
+    path.write_text(json.dumps({"format": FORMAT_SINGLE, "classes": list(MODEL_CLASSES), "run_name": "r",
                                 "params": _params(a, b),
-                                "thresholds_calibrated": dict(zip(DAMAGE_CLASSES, map(float, thr)))}))
+                                "thresholds_calibrated": dict(zip(MODEL_CLASSES, map(float, thr)))}))
     return path
 
 
@@ -62,7 +63,7 @@ def test_calibrated_provider_and_thresholds(tmp_path):
     js = _single_json(tmp_path / "cal.json", a, b, np.full(C, 0.25))
     prov = CalibratedProvider(FileProvider(maps), js)
     got = prov.get("IMG", 120, 80).probs
-    np.testing.assert_allclose(got, apply_platt(p.astype(np.float16).astype(np.float32), a, b), atol=1e-6)
+    np.testing.assert_allclose(got, apply_platt(p.astype(np.float16).astype(np.float32), a, b)[K], atol=1e-6)
     np.testing.assert_allclose(thresholds_from_json(js, DAMAGE_CLASSES), 0.25)
 
 
@@ -72,8 +73,8 @@ def test_ensemble_weighted_mean_and_shape_check(tmp_path):
         (tmp_path / name).mkdir()
         save_probability_npz(tmp_path / name / "IMG.npz", p)
     a1, b1, a2, b2 = np.full(C, 1.1), np.full(C, -1.5), np.full(C, 0.6), np.full(C, -2.0)
-    ens = {"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(DAMAGE_CLASSES),
-           "thresholds": dict(zip(DAMAGE_CLASSES, [0.3] * C)),
+    ens = {"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(MODEL_CLASSES),
+           "thresholds": dict(zip(MODEL_CLASSES, [0.3] * C)),
            "members": [{"name": "m1", "run_dir": "x/m1", "weight": 3, "params": _params(a1, b1)},
                        {"name": "m2", "run_dir": "x/m2", "weight": 1, "params": _params(a2, b2)}]}
     js = tmp_path / "ensemble.json"
@@ -82,7 +83,7 @@ def test_ensemble_weighted_mean_and_shape_check(tmp_path):
     got = prov.get("IMG", 120, 80).probs
     f16 = lambda p: p.astype(np.float16).astype(np.float32)  # noqa: E731
     exp = 0.75 * apply_platt(f16(p1), a1, b1) + 0.25 * apply_platt(f16(p2), a2, b2)
-    np.testing.assert_allclose(got, exp, atol=1e-6)
+    np.testing.assert_allclose(got, exp[K], atol=1e-6)
     np.testing.assert_allclose(thresholds_from_json(js, DAMAGE_CLASSES), 0.3)
 
     save_probability_npz(tmp_path / "m2" / "IMG.npz", np.full((C, 4, 6), 0.7, np.float32))
@@ -106,8 +107,8 @@ def test_damage3d_cli_calibration_and_ensemble(project_id, tmp_path):
     a, b = np.ones(C), np.full(C, -1.0)                  # 0.6 -> 0.355, 0.05 -> 0.019
     cal = _single_json(tmp_path / "cal.json", a, b, np.full(C, 0.3))
     ens = tmp_path / "ensemble.json"
-    ens.write_text(json.dumps({"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(DAMAGE_CLASSES),
-                               "thresholds": dict(zip(DAMAGE_CLASSES, [0.3] * C)),
+    ens.write_text(json.dumps({"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(MODEL_CLASSES),
+                               "thresholds": dict(zip(MODEL_CLASSES, [0.3] * C)),
                                "members": [{"name": n, "run_dir": f"x/{n}", "weight": 1, "params": _params(a, b)}
                                            for n in ("m1", "m2")]}))
     common = ["--project-root", str(project_id["root"]), "--start-image", "1", "--end-image", "4",

@@ -4,8 +4,8 @@ Contract
 --------
 ``provider.get(camera) -> ProbabilityMap`` with
 
-* ``probs``: float32 array (6, Hm, Wm), channel order = ``DAMAGE_CLASSES``
-  (crack, spalling, corrosion, moisture, delamination, surface), independent
+* ``probs``: float32 array (5, Hm, Wm), channel order = ``DAMAGE_CLASSES``
+  (crack, spalling, corrosion, moisture, surface; delamination closed), independent
   sigmoid probabilities in [0, 1]; channels may overlap (no softmax/argmax).
   NaN marks "no prediction for this class at this pixel".
 * ``valid``: optional bool (Hm, Wm); False pixels are not a valid view.
@@ -17,8 +17,9 @@ Contract
 File format for ``--probability-source files`` (defined here; the model does
 not exist yet): ``<probabilities-dir>/<camera stem>.npz`` with keys
 
-* ``probs``   (6, Hm, Wm) float16/float32 in [0, 1], or uint8 (value / 255);
-* ``classes`` array of 6 strings, must equal DAMAGE_CLASSES (checked);
+* ``probs``   (K, Hm, Wm) float16/float32 in [0, 1], or uint8 (value / 255);
+* ``classes`` array of K strings (scripts/23 writes the 6 MODEL_CLASSES); the
+  DAMAGE_CLASSES channels are selected BY NAME (missing class -> error);
 * ``valid``   optional (Hm, Wm) bool/uint8.
 
 Use ``save_probability_npz`` to write it from the future inference script.
@@ -35,7 +36,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .classes import DAMAGE_CLASSES, NUM_CLASSES
+from .classes import DAMAGE_CLASSES, MODEL_CLASSES, NUM_CLASSES
 
 log = logging.getLogger("damage3d")
 
@@ -138,14 +139,14 @@ class SyntheticProvider(ProbabilityProvider):
         gx, gy = np.meshgrid(xs, ys)
         probs = np.empty((NUM_CLASSES, hm, wm), dtype=np.float32)
         sigma = 0.22
-        for c, (cx, cy) in enumerate(self.CENTERS):
+        for c, (cx, cy) in enumerate(self.CENTERS[:NUM_CLASSES]):
             probs[c] = 0.95 * np.exp(-0.5 * (((gx - cx) ** 2 + (gy - cy) ** 2) / sigma**2))
         return ProbabilityMap(probs)
 
     def describe(self) -> dict:
         d = {"type": "synthetic", "pattern": self.pattern, "is_ai_prediction": False}
         if self.pattern == "regions":
-            d.update({"downsample": self.downsample, "centers": self.CENTERS, "sigma": 0.22, "peak": 0.95})
+            d.update({"downsample": self.downsample, "centers": self.CENTERS[:NUM_CLASSES], "sigma": 0.22, "peak": 0.95})
         else:
             d.update({"mask_pattern": self.mask_pattern, "mask_classes": list(self.mask_classes),
                       "mask_dir": str(self.mask_dir)})
@@ -187,9 +188,11 @@ class FileProvider(ProbabilityProvider):
             if "probs" not in data or "classes" not in data:
                 raise ValueError(f"{path}: required keys 'probs' and 'classes'.")
             classes = tuple(str(c) for c in data["classes"].tolist())
-            if classes != DAMAGE_CLASSES:
-                raise ValueError(f"{path}: class order {classes} != {DAMAGE_CLASSES}.")
-            probs = data["probs"]
+            missing = [c for c in DAMAGE_CLASSES if c not in classes]
+            if missing or data["probs"].shape[0] != len(classes):
+                raise ValueError(f"{path}: classes {classes} (probs {data['probs'].shape}) "
+                                 f"do not provide {DAMAGE_CLASSES}.")
+            probs = data["probs"][[classes.index(c) for c in DAMAGE_CLASSES]]   # closed classes dropped
             probs = probs.astype(np.float32) / 255.0 if probs.dtype == np.uint8 else probs.astype(np.float32)
             valid = data["valid"].astype(bool) if "valid" in data else None
         pmap = ProbabilityMap(probs, valid)
@@ -276,8 +279,9 @@ class EnsembleProvider(ProbabilityProvider):
         payload = read_json(self.ensemble_path)
         if payload.get("format") != FORMAT_ENSEMBLE:
             raise ValueError(f"{ensemble_path}: format '{payload.get('format')}' != '{FORMAT_ENSEMBLE}'.")
-        if list(payload.get("classes", [])) != list(DAMAGE_CLASSES):
-            raise ValueError(f"{ensemble_path}: class order {payload.get('classes')} != {list(DAMAGE_CLASSES)}.")
+        missing = [c for c in DAMAGE_CLASSES if c not in payload.get("classes", [])]
+        if missing:
+            raise ValueError(f"{ensemble_path}: classes {missing} not in {payload.get('classes')}.")
         self.ensemble_sha256 = sha256_file(self.ensemble_path)
         self.name = payload.get("name")
         member_maps = dict(member_maps or {})
@@ -335,16 +339,16 @@ class EnsembleProvider(ProbabilityProvider):
 
 
 def save_probability_npz(path: Path, probs: np.ndarray, valid: np.ndarray | None = None,
-                         dtype: str = "float16") -> None:
-    """Helper for the future inference script (writes the FileProvider format)."""
+                         dtype: str = "float16", classes: tuple[str, ...] = MODEL_CLASSES) -> None:
+    """Writes the FileProvider format; default = all model channels (scripts/23)."""
     probs = np.asarray(probs)
-    if probs.ndim != 3 or probs.shape[0] != NUM_CLASSES:
-        raise ValueError(f"probs must be ({NUM_CLASSES}, H, W), got {probs.shape}.")
+    if probs.ndim != 3 or probs.shape[0] != len(classes):
+        raise ValueError(f"probs must be ({len(classes)}, H, W), got {probs.shape}.")
     if dtype == "uint8":
         stored = np.clip(np.rint(probs * 255.0), 0, 255).astype(np.uint8)
     else:
         stored = probs.astype(dtype)
-    arrays = {"probs": stored, "classes": np.array(DAMAGE_CLASSES)}
+    arrays = {"probs": stored, "classes": np.array(classes)}
     if valid is not None:
         arrays["valid"] = np.asarray(valid, dtype=bool)
     np.savez_compressed(path, **arrays)

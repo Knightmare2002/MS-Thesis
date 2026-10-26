@@ -3,7 +3,7 @@
 `damage3d` is the geometric part of the thesis pipeline:
 
 ```
-2D probability maps (6 classes) -> Metashape cameras -> visible 3D points -> multi-view fusion -> 3D outputs
+2D probability maps (6 model channels; 5 mapped, delamination closed) -> Metashape cameras -> visible 3D points -> multi-view fusion -> 3D outputs
 ```
 
 **The deep-learning model is not part of this package.** It is represented by a
@@ -135,7 +135,7 @@ Class colours:
 - surface: green (77, 175, 74).
 
 **Points with more than one class.** The RGB colour is the positive class with the largest `score/threshold` ratio. It is only a display choice. All the positive classes are kept in:
-- `label_mask`, a bitmask: crack = 1, spalling = 2, corrosion = 4, moisture = 8, delamination = 16, surface = 32;
+- `label_mask`, a bitmask: crack = 1, spalling = 2, corrosion = 4, moisture = 8, surface = 16 (delamination closed since 2026-10-26: never mapped; outputs produced before that date used delamination = 16, surface = 32);
 - `n_classes`;
 - the six `score_*` fields.
 
@@ -153,7 +153,7 @@ Thresholds (`--thresholds 0.5` or `crack=0.6,spalling=0.7,...`) and `--min-views
   - `state`, `label_mask`, `n_classes`, `n_views`;
   - `score_<class>` x6 (NaN when unobserved) and `views_<class>` x6;
   - `source_index`: the record index in the original PLY.
-- **`fused/chunk_XXXXXX.npz`**: machine-readable arrays `source_index, xyz, score(n,6), views(n,6), votes(n,6), n_views, label_mask, state, rgb`. `classes.json` gives the channel order.
+- **`fused/chunk_XXXXXX.npz`**: machine-readable arrays `source_index, xyz, score(n,5), views(n,5), votes(n,5), n_views, label_mask, state, rgb`. `classes.json` gives the channel order.
 - **`fused_points.csv`**: only written when the exported points are at most `--csv-max-points`.
 - **`per_camera_stats.csv`**, per camera:
   - point counts: candidates, in_front, in_image, occluded, valid_views;

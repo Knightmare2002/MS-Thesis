@@ -12,6 +12,11 @@ Reported quantities
 
 * `false_alarm_rate_empty_gt`: share of (image, channel) pairs with empty ground truth where the model still predicts that damage.
 
+Classes in `CLOSED_DAMAGE_CLASSES` (delamination since 2026-10-26) keep their
+per-class values but are excluded from every aggregate above (macro, micro, FAR,
+hence from model selection); `macro_dice_present_all_channels` reproduces the
+historical 6-channel macro Dice.
+
 Aliases `dice`, `iou`, `precision`, `recall` map to the micro values so the existing `fit` history writer and console logging keep working unchanged.
 """
 
@@ -23,7 +28,7 @@ from dataclasses import dataclass, field
 import torch
 from tqdm.auto import tqdm
 
-from ..data.class_mapping import UNIFIED_DAMAGE_CLASSES
+from ..data.class_mapping import CLOSED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES
 
 EPS = 1e-7
 
@@ -152,10 +157,15 @@ class MultilabelSegmentationMetrics:
     def compute(self) -> dict[str, float]:
         """Return a flat, CSV-friendly dictionary of all metrics."""
         per_class = self.per_class()
-        present = [name for name, values in per_class.items() if values["support_pixels"] > 0]
+        # Aggregates (macro, micro, FAR -> model selection) use the reported classes
+        # only; closed classes keep their per-class rows. `macro_dice_present_all_channels`
+        # keeps the historical all-channel value for comparison with older CSVs.
+        reported = [c for c in range(self.n_classes) if self.class_names[c] not in CLOSED_DAMAGE_CLASSES]
+        present_all = [name for name, values in per_class.items() if values["support_pixels"] > 0]
+        present = [name for name in present_all if name not in CLOSED_DAMAGE_CLASSES]
         n_present = max(len(present), 1)
 
-        tp, fp, fn, tn = (sum(values) for values in (self.tp, self.fp, self.fn, self.tn))
+        tp, fp, fn, tn = (sum(getattr(self, k)[c] for c in reported) for k in ("tp", "fp", "fn", "tn"))
 
         metrics: dict[str, float] = {
             "macro_dice_present": sum(per_class[n]["dice"] for n in present) / n_present,
@@ -169,8 +179,13 @@ class MultilabelSegmentationMetrics:
             "pixel_accuracy": (tp + tn) / (tp + fp + fn + tn + EPS),
             "n_classes_present": float(len(present)),
             "false_alarm_rate_empty_gt": (
-                sum(self.n_images_empty_with_prediction) / max(sum(self.n_images_empty), 1)
+                sum(self.n_images_empty_with_prediction[c] for c in reported)
+                / max(sum(self.n_images_empty[c] for c in reported), 1)
             ),
+            "macro_dice_present_all_channels": (
+                sum(per_class[n]["dice"] for n in present_all) / max(len(present_all), 1)
+            ),
+            "n_closed_classes": float(self.n_classes - len(reported)),
         }
 
         # Aliases so engine.fit's history writer / logging work unchanged.

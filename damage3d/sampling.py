@@ -1,4 +1,4 @@
-"""Reading the six probabilities at projected pixel positions.
+"""Reading the per-class probabilities at projected pixel positions.
 
 Coordinates: (u, v) in the Metashape corner convention of the full image
 (W x H). For a map of size (Wm, Hm) the continuous map coordinates are

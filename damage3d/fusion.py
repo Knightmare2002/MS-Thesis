@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .classes import (CLASS_COLORS, DAMAGE_CLASSES, NUM_CLASSES, STATE_COLORS, STATE_DAMAGE,
+from .classes import (CLASS_COLORS, CLOSED_CLASSES, DAMAGE_CLASSES, NUM_CLASSES, STATE_COLORS, STATE_DAMAGE,
                       STATE_INSUFFICIENT_VIEWS, STATE_NOT_OBSERVED, STATE_OBSERVED_NO_DAMAGE)
 
 COUNT_DTYPE = np.uint16
@@ -102,6 +102,8 @@ def parse_thresholds(text: str | None, default: float = 0.5) -> np.ndarray:
     for item in text.split(","):
         name, value = item.split("=", 1)
         name = name.strip()
+        if name in CLOSED_CLASSES:
+            continue  # closed class (e.g. delamination in a script-17 string): not mapped in 3D
         if name not in DAMAGE_CLASSES:
             raise ValueError(f"Unknown class in thresholds: '{name}'.")
         thr[DAMAGE_CLASSES.index(name)] = float(value)

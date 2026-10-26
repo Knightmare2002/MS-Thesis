@@ -1,0 +1,744 @@
+diff --git a/damage3d/README.md b/damage3d/README.md
+index 4f41e36..aab5d5b 100644
+--- a/damage3d/README.md
++++ b/damage3d/README.md
+@@ -3,7 +3,7 @@
+ `damage3d` is the geometric part of the thesis pipeline:
+ 
+ ```
+-2D probability maps (6 classes) -> Metashape cameras -> visible 3D points -> multi-view fusion -> 3D outputs
++2D probability maps (6 model channels; 5 mapped, delamination closed) -> Metashape cameras -> visible 3D points -> multi-view fusion -> 3D outputs
+ ```
+ 
+ **The deep-learning model is not part of this package.** It is represented by a
+@@ -135,7 +135,7 @@ Class colours:
+ - surface: green (77, 175, 74).
+ 
+ **Points with more than one class.** The RGB colour is the positive class with the largest `score/threshold` ratio. It is only a display choice. All the positive classes are kept in:
+-- `label_mask`, a bitmask: crack = 1, spalling = 2, corrosion = 4, moisture = 8, delamination = 16, surface = 32;
++- `label_mask`, a bitmask: crack = 1, spalling = 2, corrosion = 4, moisture = 8, surface = 16 (delamination closed since 2026-10-26: never mapped; outputs produced before that date used delamination = 16, surface = 32);
+ - `n_classes`;
+ - the six `score_*` fields.
+ 
+@@ -153,7 +153,7 @@ Thresholds (`--thresholds 0.5` or `crack=0.6,spalling=0.7,...`) and `--min-views
+   - `state`, `label_mask`, `n_classes`, `n_views`;
+   - `score_<class>` x6 (NaN when unobserved) and `views_<class>` x6;
+   - `source_index`: the record index in the original PLY.
+-- **`fused/chunk_XXXXXX.npz`**: machine-readable arrays `source_index, xyz, score(n,6), views(n,6), votes(n,6), n_views, label_mask, state, rgb`. `classes.json` gives the channel order.
++- **`fused/chunk_XXXXXX.npz`**: machine-readable arrays `source_index, xyz, score(n,5), views(n,5), votes(n,5), n_views, label_mask, state, rgb`. `classes.json` gives the channel order.
+ - **`fused_points.csv`**: only written when the exported points are at most `--csv-max-points`.
+ - **`per_camera_stats.csv`**, per camera:
+   - point counts: candidates, in_front, in_image, occluded, valid_views;
+diff --git a/damage3d/classes.py b/damage3d/classes.py
+index efc41d1..e988495 100644
+--- a/damage3d/classes.py
++++ b/damage3d/classes.py
+@@ -15,18 +15,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
+ if str(REPO_ROOT) not in sys.path:
+     sys.path.insert(0, str(REPO_ROOT))
+ 
+-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES  # noqa: E402
++from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES  # noqa: E402
+ 
+-DAMAGE_CLASSES: tuple[str, ...] = tuple(UNIFIED_DAMAGE_CLASSES)
++# MODEL_CLASSES: channels written by the network / scripts 23-28 (maps, Platt, thresholds).
++# DAMAGE_CLASSES: channels mapped in 3D = MODEL_CLASSES minus the closed classes
++# (delamination since 2026-10-26). Providers select them BY NAME from the maps.
++MODEL_CLASSES: tuple[str, ...] = tuple(UNIFIED_DAMAGE_CLASSES)
++CLOSED_CLASSES: tuple[str, ...] = tuple(CLOSED_DAMAGE_CLASSES)
++DAMAGE_CLASSES: tuple[str, ...] = tuple(c for c in MODEL_CLASSES if c not in CLOSED_CLASSES)
+ NUM_CLASSES: int = len(DAMAGE_CLASSES)
++MODEL_CHANNELS: tuple[int, ...] = tuple(MODEL_CLASSES.index(c) for c in DAMAGE_CLASSES)
+ 
+-# Order verified in the repository on 2026-09-30. If the taxonomy changes, this
+-# guard fails loudly instead of silently permuting the 3D channels.
+-_EXPECTED_ORDER = ("crack", "spalling", "corrosion", "moisture", "delamination", "surface")
+-if DAMAGE_CLASSES != _EXPECTED_ORDER:
++# Orders verified in the repository (2026-09-30, closure 2026-10-26). If the
++# taxonomy changes, this guard fails loudly instead of silently permuting channels.
++_EXPECTED_MODEL_ORDER = ("crack", "spalling", "corrosion", "moisture", "delamination", "surface")
++_EXPECTED_ORDER = ("crack", "spalling", "corrosion", "moisture", "surface")
++if MODEL_CLASSES != _EXPECTED_MODEL_ORDER or DAMAGE_CLASSES != _EXPECTED_ORDER:
+     raise RuntimeError(
+-        f"UNIFIED_DAMAGE_CLASSES changed: {DAMAGE_CLASSES} != {_EXPECTED_ORDER}. "
+-        "Update damage3d (colors, docs, tests) before running the 3D pipeline."
++        f"Class order changed: model {MODEL_CLASSES} / 3D {DAMAGE_CLASSES}, expected "
++        f"{_EXPECTED_MODEL_ORDER} / {_EXPECTED_ORDER}. Update damage3d (colors, docs, tests) first."
+     )
+ 
+ # Visual convention (RGB, 0-255). Distinct from the state colors below.
+@@ -35,7 +42,7 @@ CLASS_COLORS: dict[str, tuple[int, int, int]] = {
+     "spalling": (255, 127, 0),       # orange
+     "corrosion": (166, 86, 40),      # brown
+     "moisture": (0, 190, 255),       # cyan
+-    "delamination": (152, 78, 163),  # purple
++    "delamination": (152, 78, 163),  # purple (closed: only in 2D overlays of model channels)
+     "surface": (77, 175, 74),        # green
+ }
+ 
+diff --git a/damage3d/cli.py b/damage3d/cli.py
+index 3453930..7a5bcad 100644
+--- a/damage3d/cli.py
++++ b/damage3d/cli.py
+@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
+     g.add_argument("--member-maps", action="append", default=[], metavar="NAME=DIR",
+                    help="maps folder of an ensemble member (repeatable); default <project-root>/damage3d_maps/<run name>")
+     g.add_argument("--synthetic-pattern", choices=("regions", "mask"), default="regions",
+-                   help="'regions': six overlapping Gaussian bumps; 'mask': prototype PNG mask")
++                   help="'regions': one Gaussian bump per mapped class (overlapping); 'mask': prototype PNG mask")
+     g.add_argument("--synthetic-downsample", type=int, default=8, help="resolution divisor of synthetic maps")
+     g.add_argument("--synthetic-mask-pattern", default="{stem}_mask_test.png",
+                    help="mask file name in the project root, for --synthetic-pattern mask")
+diff --git a/damage3d/fusion.py b/damage3d/fusion.py
+index 287a8cc..36bfe34 100644
+--- a/damage3d/fusion.py
++++ b/damage3d/fusion.py
+@@ -29,7 +29,7 @@ from pathlib import Path
+ 
+ import numpy as np
+ 
+-from .classes import (CLASS_COLORS, DAMAGE_CLASSES, NUM_CLASSES, STATE_COLORS, STATE_DAMAGE,
++from .classes import (CLASS_COLORS, CLOSED_CLASSES, DAMAGE_CLASSES, NUM_CLASSES, STATE_COLORS, STATE_DAMAGE,
+                       STATE_INSUFFICIENT_VIEWS, STATE_NOT_OBSERVED, STATE_OBSERVED_NO_DAMAGE)
+ 
+ COUNT_DTYPE = np.uint16
+@@ -102,6 +102,8 @@ def parse_thresholds(text: str | None, default: float = 0.5) -> np.ndarray:
+     for item in text.split(","):
+         name, value = item.split("=", 1)
+         name = name.strip()
++        if name in CLOSED_CLASSES:
++            continue  # closed class (e.g. delamination in a script-17 string): not mapped in 3D
+         if name not in DAMAGE_CLASSES:
+             raise ValueError(f"Unknown class in thresholds: '{name}'.")
+         thr[DAMAGE_CLASSES.index(name)] = float(value)
+diff --git a/damage3d/providers.py b/damage3d/providers.py
+index 57e5b3b..f6bd21c 100644
+--- a/damage3d/providers.py
++++ b/damage3d/providers.py
+@@ -4,8 +4,8 @@ Contract
+ --------
+ ``provider.get(camera) -> ProbabilityMap`` with
+ 
+-* ``probs``: float32 array (6, Hm, Wm), channel order = ``DAMAGE_CLASSES``
+-  (crack, spalling, corrosion, moisture, delamination, surface), independent
++* ``probs``: float32 array (5, Hm, Wm), channel order = ``DAMAGE_CLASSES``
++  (crack, spalling, corrosion, moisture, surface; delamination closed), independent
+   sigmoid probabilities in [0, 1]; channels may overlap (no softmax/argmax).
+   NaN marks "no prediction for this class at this pixel".
+ * ``valid``: optional bool (Hm, Wm); False pixels are not a valid view.
+@@ -17,8 +17,9 @@ Contract
+ File format for ``--probability-source files`` (defined here; the model does
+ not exist yet): ``<probabilities-dir>/<camera stem>.npz`` with keys
+ 
+-* ``probs``   (6, Hm, Wm) float16/float32 in [0, 1], or uint8 (value / 255);
+-* ``classes`` array of 6 strings, must equal DAMAGE_CLASSES (checked);
++* ``probs``   (K, Hm, Wm) float16/float32 in [0, 1], or uint8 (value / 255);
++* ``classes`` array of K strings (scripts/23 writes the 6 MODEL_CLASSES); the
++  DAMAGE_CLASSES channels are selected BY NAME (missing class -> error);
+ * ``valid``   optional (Hm, Wm) bool/uint8.
+ 
+ Use ``save_probability_npz`` to write it from the future inference script.
+@@ -35,7 +36,7 @@ from pathlib import Path
+ 
+ import numpy as np
+ 
+-from .classes import DAMAGE_CLASSES, NUM_CLASSES
++from .classes import DAMAGE_CLASSES, MODEL_CLASSES, NUM_CLASSES
+ 
+ log = logging.getLogger("damage3d")
+ 
+@@ -138,14 +139,14 @@ class SyntheticProvider(ProbabilityProvider):
+         gx, gy = np.meshgrid(xs, ys)
+         probs = np.empty((NUM_CLASSES, hm, wm), dtype=np.float32)
+         sigma = 0.22
+-        for c, (cx, cy) in enumerate(self.CENTERS):
++        for c, (cx, cy) in enumerate(self.CENTERS[:NUM_CLASSES]):
+             probs[c] = 0.95 * np.exp(-0.5 * (((gx - cx) ** 2 + (gy - cy) ** 2) / sigma**2))
+         return ProbabilityMap(probs)
+ 
+     def describe(self) -> dict:
+         d = {"type": "synthetic", "pattern": self.pattern, "is_ai_prediction": False}
+         if self.pattern == "regions":
+-            d.update({"downsample": self.downsample, "centers": self.CENTERS, "sigma": 0.22, "peak": 0.95})
++            d.update({"downsample": self.downsample, "centers": self.CENTERS[:NUM_CLASSES], "sigma": 0.22, "peak": 0.95})
+         else:
+             d.update({"mask_pattern": self.mask_pattern, "mask_classes": list(self.mask_classes),
+                       "mask_dir": str(self.mask_dir)})
+@@ -187,9 +188,11 @@ class FileProvider(ProbabilityProvider):
+             if "probs" not in data or "classes" not in data:
+                 raise ValueError(f"{path}: required keys 'probs' and 'classes'.")
+             classes = tuple(str(c) for c in data["classes"].tolist())
+-            if classes != DAMAGE_CLASSES:
+-                raise ValueError(f"{path}: class order {classes} != {DAMAGE_CLASSES}.")
+-            probs = data["probs"]
++            missing = [c for c in DAMAGE_CLASSES if c not in classes]
++            if missing or data["probs"].shape[0] != len(classes):
++                raise ValueError(f"{path}: classes {classes} (probs {data['probs'].shape}) "
++                                 f"do not provide {DAMAGE_CLASSES}.")
++            probs = data["probs"][[classes.index(c) for c in DAMAGE_CLASSES]]   # closed classes dropped
+             probs = probs.astype(np.float32) / 255.0 if probs.dtype == np.uint8 else probs.astype(np.float32)
+             valid = data["valid"].astype(bool) if "valid" in data else None
+         pmap = ProbabilityMap(probs, valid)
+@@ -276,8 +279,9 @@ class EnsembleProvider(ProbabilityProvider):
+         payload = read_json(self.ensemble_path)
+         if payload.get("format") != FORMAT_ENSEMBLE:
+             raise ValueError(f"{ensemble_path}: format '{payload.get('format')}' != '{FORMAT_ENSEMBLE}'.")
+-        if list(payload.get("classes", [])) != list(DAMAGE_CLASSES):
+-            raise ValueError(f"{ensemble_path}: class order {payload.get('classes')} != {list(DAMAGE_CLASSES)}.")
++        missing = [c for c in DAMAGE_CLASSES if c not in payload.get("classes", [])]
++        if missing:
++            raise ValueError(f"{ensemble_path}: classes {missing} not in {payload.get('classes')}.")
+         self.ensemble_sha256 = sha256_file(self.ensemble_path)
+         self.name = payload.get("name")
+         member_maps = dict(member_maps or {})
+@@ -335,16 +339,16 @@ class EnsembleProvider(ProbabilityProvider):
+ 
+ 
+ def save_probability_npz(path: Path, probs: np.ndarray, valid: np.ndarray | None = None,
+-                         dtype: str = "float16") -> None:
+-    """Helper for the future inference script (writes the FileProvider format)."""
++                         dtype: str = "float16", classes: tuple[str, ...] = MODEL_CLASSES) -> None:
++    """Writes the FileProvider format; default = all model channels (scripts/23)."""
+     probs = np.asarray(probs)
+-    if probs.ndim != 3 or probs.shape[0] != NUM_CLASSES:
+-        raise ValueError(f"probs must be ({NUM_CLASSES}, H, W), got {probs.shape}.")
++    if probs.ndim != 3 or probs.shape[0] != len(classes):
++        raise ValueError(f"probs must be ({len(classes)}, H, W), got {probs.shape}.")
+     if dtype == "uint8":
+         stored = np.clip(np.rint(probs * 255.0), 0, 255).astype(np.uint8)
+     else:
+         stored = probs.astype(dtype)
+-    arrays = {"probs": stored, "classes": np.array(DAMAGE_CLASSES)}
++    arrays = {"probs": stored, "classes": np.array(classes)}
+     if valid is not None:
+         arrays["valid"] = np.asarray(valid, dtype=bool)
+     np.savez_compressed(path, **arrays)
+diff --git a/damage3d/sampling.py b/damage3d/sampling.py
+index eb1b12c..cf359f3 100644
+--- a/damage3d/sampling.py
++++ b/damage3d/sampling.py
+@@ -1,4 +1,4 @@
+-"""Reading the six probabilities at projected pixel positions.
++"""Reading the per-class probabilities at projected pixel positions.
+ 
+ Coordinates: (u, v) in the Metashape corner convention of the full image
+ (W x H). For a map of size (Wm, Hm) the continuous map coordinates are
+diff --git a/damage3d/tests/test_calibration.py b/damage3d/tests/test_calibration.py
+index bc0756a..c91f31f 100644
+--- a/damage3d/tests/test_calibration.py
++++ b/damage3d/tests/test_calibration.py
+@@ -6,23 +6,24 @@ import json
+ import numpy as np
+ import pytest
+ 
+-from damage3d.classes import DAMAGE_CLASSES
++from damage3d.classes import DAMAGE_CLASSES, MODEL_CHANNELS, MODEL_CLASSES
+ from damage3d.providers import CalibratedProvider, EnsembleProvider, FileProvider, save_probability_npz
+ from src.eval.probability_calibration import (FORMAT_ENSEMBLE, FORMAT_SINGLE, apply_platt, bin_centers,
+                                               fit_platt_from_histograms, logit, map_thresholds, sigmoid,
+                                               thresholds_from_json)
+ 
+-C = len(DAMAGE_CLASSES)
++C = len(MODEL_CLASSES)          # maps / Platt JSON carry all model channels (as scripts/23, 27, 28)
++K = list(MODEL_CHANNELS)        # providers return the reported classes only (delamination closed)
+ 
+ 
+ def _params(a, b):
+-    return {c: {"a": float(a[i]), "b": float(b[i])} for i, c in enumerate(DAMAGE_CLASSES)}
++    return {c: {"a": float(a[i]), "b": float(b[i])} for i, c in enumerate(MODEL_CLASSES)}
+ 
+ 
+ def _single_json(path, a, b, thr):
+-    path.write_text(json.dumps({"format": FORMAT_SINGLE, "classes": list(DAMAGE_CLASSES), "run_name": "r",
++    path.write_text(json.dumps({"format": FORMAT_SINGLE, "classes": list(MODEL_CLASSES), "run_name": "r",
+                                 "params": _params(a, b),
+-                                "thresholds_calibrated": dict(zip(DAMAGE_CLASSES, map(float, thr)))}))
++                                "thresholds_calibrated": dict(zip(MODEL_CLASSES, map(float, thr)))}))
+     return path
+ 
+ 
+@@ -62,7 +63,7 @@ def test_calibrated_provider_and_thresholds(tmp_path):
+     js = _single_json(tmp_path / "cal.json", a, b, np.full(C, 0.25))
+     prov = CalibratedProvider(FileProvider(maps), js)
+     got = prov.get("IMG", 120, 80).probs
+-    np.testing.assert_allclose(got, apply_platt(p.astype(np.float16).astype(np.float32), a, b), atol=1e-6)
++    np.testing.assert_allclose(got, apply_platt(p.astype(np.float16).astype(np.float32), a, b)[K], atol=1e-6)
+     np.testing.assert_allclose(thresholds_from_json(js, DAMAGE_CLASSES), 0.25)
+ 
+ 
+@@ -72,8 +73,8 @@ def test_ensemble_weighted_mean_and_shape_check(tmp_path):
+         (tmp_path / name).mkdir()
+         save_probability_npz(tmp_path / name / "IMG.npz", p)
+     a1, b1, a2, b2 = np.full(C, 1.1), np.full(C, -1.5), np.full(C, 0.6), np.full(C, -2.0)
+-    ens = {"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(DAMAGE_CLASSES),
+-           "thresholds": dict(zip(DAMAGE_CLASSES, [0.3] * C)),
++    ens = {"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(MODEL_CLASSES),
++           "thresholds": dict(zip(MODEL_CLASSES, [0.3] * C)),
+            "members": [{"name": "m1", "run_dir": "x/m1", "weight": 3, "params": _params(a1, b1)},
+                        {"name": "m2", "run_dir": "x/m2", "weight": 1, "params": _params(a2, b2)}]}
+     js = tmp_path / "ensemble.json"
+@@ -82,7 +83,7 @@ def test_ensemble_weighted_mean_and_shape_check(tmp_path):
+     got = prov.get("IMG", 120, 80).probs
+     f16 = lambda p: p.astype(np.float16).astype(np.float32)  # noqa: E731
+     exp = 0.75 * apply_platt(f16(p1), a1, b1) + 0.25 * apply_platt(f16(p2), a2, b2)
+-    np.testing.assert_allclose(got, exp, atol=1e-6)
++    np.testing.assert_allclose(got, exp[K], atol=1e-6)
+     np.testing.assert_allclose(thresholds_from_json(js, DAMAGE_CLASSES), 0.3)
+ 
+     save_probability_npz(tmp_path / "m2" / "IMG.npz", np.full((C, 4, 6), 0.7, np.float32))
+@@ -106,8 +107,8 @@ def test_damage3d_cli_calibration_and_ensemble(project_id, tmp_path):
+     a, b = np.ones(C), np.full(C, -1.0)                  # 0.6 -> 0.355, 0.05 -> 0.019
+     cal = _single_json(tmp_path / "cal.json", a, b, np.full(C, 0.3))
+     ens = tmp_path / "ensemble.json"
+-    ens.write_text(json.dumps({"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(DAMAGE_CLASSES),
+-                               "thresholds": dict(zip(DAMAGE_CLASSES, [0.3] * C)),
++    ens.write_text(json.dumps({"format": FORMAT_ENSEMBLE, "name": "e", "classes": list(MODEL_CLASSES),
++                               "thresholds": dict(zip(MODEL_CLASSES, [0.3] * C)),
+                                "members": [{"name": n, "run_dir": f"x/{n}", "weight": 1, "params": _params(a, b)}
+                                            for n in ("m1", "m2")]}))
+     common = ["--project-root", str(project_id["root"]), "--start-image", "1", "--end-image", "4",
+diff --git a/damage3d/tests/test_end_to_end.py b/damage3d/tests/test_end_to_end.py
+index f136741..dd3b5d2 100644
+--- a/damage3d/tests/test_end_to_end.py
++++ b/damage3d/tests/test_end_to_end.py
+@@ -137,7 +137,8 @@ def test_files_provider_end_to_end(project_id, tmp_path):
+     from damage3d.providers import save_probability_npz
+     probs = np.zeros((6, 48, 64), np.float32)
+     probs[1] = 0.9          # spalling everywhere
+-    probs[4, :, :32] = 0.8  # delamination on the left half, overlapping spalling
++    probs[5, :, :32] = 0.8  # surface on the left half, overlapping spalling
++    probs[4] = 0.95         # delamination (closed class): present in the file, never mapped
+     maps = tmp_path / "maps"
+     maps.mkdir()
+     save_probability_npz(maps / "DSC01020.npz", probs)
+@@ -148,7 +149,8 @@ def test_files_provider_end_to_end(project_id, tmp_path):
+     d = _load_shards(out)
+     seen = d["n_views"] > 0
+     assert (d["label_mask"][seen] & 2).all()                           # spalling bit on every seen point
+-    assert ((d["label_mask"][seen] & 16) > 0).any() and ((d["label_mask"][seen] & 16) == 0).any()
++    assert ((d["label_mask"][seen] & 16) > 0).any() and ((d["label_mask"][seen] & 16) == 0).any()  # surface
++    assert (d["label_mask"][seen] < 32).all()                          # 5 classes: no delamination bit
+     assert (d["state"][seen] == STATE_DAMAGE).all()
+ 
+ 
+diff --git a/damage3d/tests/test_inference_maps.py b/damage3d/tests/test_inference_maps.py
+index 764a26f..b59bae7 100644
+--- a/damage3d/tests/test_inference_maps.py
++++ b/damage3d/tests/test_inference_maps.py
+@@ -117,10 +117,10 @@ def test_inference_maps_feed_damage3d(project_id, tmp_path):
+ def test_render_overlay_marks_only_positive_classes():
+     script = _load_script()
+     image = np.full((60, 80, 3), 128, np.uint8)
+-    probs = np.zeros((6, 30, 40), np.float32)
++    probs = np.zeros((5, 30, 40), np.float32)   # reported classes (delamination closed)
+     probs[1] = 0.9                       # spalling everywhere
+-    probs[4, :, :20] = 0.9               # delamination on the left half (overlaps spalling)
+-    thresholds = np.full(6, 0.5, np.float32)
++    probs[4, :, :20] = 0.9               # surface on the left half (overlaps spalling)
++    thresholds = np.full(5, 0.5, np.float32)
+     grid, boxes = script.render_overlay(image, probs, thresholds, "t", panel_width=80, alpha=0.5)
+ 
+     def panel(name):
+@@ -130,7 +130,8 @@ def test_render_overlay_marks_only_positive_classes():
+     photo = panel("photo")
+     assert np.array_equal(panel("crack"), photo)          # no crack -> untouched photo
+     assert (panel("spalling") != photo).any(axis=2).all()  # spalling tinted everywhere
+-    delam = panel("delamination")
+-    assert (delam[:, :35] != photo[:, :35]).any(axis=2).all() and np.array_equal(delam[:, 45:], photo[:, 45:])
++    assert "delamination" not in boxes
++    surf = panel("surface")
++    assert (surf[:, :35] != photo[:, :35]).any(axis=2).all() and np.array_equal(surf[:, 45:], photo[:, 45:])
+     both = panel("all")
+     assert not np.array_equal(both[:, :35], both[:, 45:])  # overlap gets a different (mean) color
+diff --git a/damage3d/tests/test_occlusion_providers_fusion.py b/damage3d/tests/test_occlusion_providers_fusion.py
+index 9b924e8..fa292af 100644
+--- a/damage3d/tests/test_occlusion_providers_fusion.py
++++ b/damage3d/tests/test_occlusion_providers_fusion.py
+@@ -5,7 +5,7 @@ from __future__ import annotations
+ import numpy as np
+ import pytest
+ 
+-from damage3d.classes import (DAMAGE_CLASSES, STATE_DAMAGE, STATE_INSUFFICIENT_VIEWS, STATE_NOT_OBSERVED,
++from damage3d.classes import (DAMAGE_CLASSES, MODEL_CHANNELS, MODEL_CLASSES, STATE_DAMAGE, STATE_INSUFFICIENT_VIEWS, STATE_NOT_OBSERVED,
+                               STATE_OBSERVED_NO_DAMAGE, class_bit)
+ from damage3d.fusion import ChunkAccumulator, fuse, parse_thresholds
+ from damage3d.providers import FileProvider, ProbabilityMap, SyntheticProvider, save_probability_npz
+@@ -47,7 +47,7 @@ def test_surface_deviation_stats(occ_chunk):
+ # ---------------------------------------------------------------- providers
+ def test_synthetic_provider_six_overlapping_channels():
+     pmap = SyntheticProvider(downsample=4).get("DSC00001", 640, 480)
+-    assert pmap.probs.shape == (6, 120, 160) and pmap.probs.dtype == np.float32
++    assert pmap.probs.shape == (5, 120, 160) and pmap.probs.dtype == np.float32
+     assert 0.0 <= pmap.probs.min() and pmap.probs.max() <= 1.0
+     positive = pmap.probs >= 0.5
+     assert positive.any(axis=(1, 2)).all()                  # every class present
+@@ -69,25 +69,28 @@ def test_synthetic_mask_provider(tmp_path):
+ 
+ 
+ def test_file_provider_roundtrip_and_class_order(tmp_path):
+-    probs = np.random.default_rng(0).uniform(size=(6, 60, 80)).astype(np.float32)
++    probs = np.random.default_rng(0).uniform(size=(6, 60, 80)).astype(np.float32)   # 6 model channels
+     save_probability_npz(tmp_path / "DSC00001.npz", probs, dtype="float32")
+     prov = FileProvider(tmp_path)
+     assert prov.check_available(["DSC00001", "DSC00002"]) == ["DSC00002"]
+-    np.testing.assert_array_equal(prov.get("DSC00001", 640, 480).probs, probs)
+-    np.savez(tmp_path / "DSC00003.npz", probs=probs, classes=np.array(DAMAGE_CLASSES[::-1]))
+-    with pytest.raises(ValueError, match="class order"):
+-        prov.get("DSC00003", 640, 480)
++    np.testing.assert_array_equal(prov.get("DSC00001", 640, 480).probs, probs[list(MODEL_CHANNELS)])
++    # Channels are selected by name: a permuted file gives the same 5 reported maps.
++    np.savez(tmp_path / "DSC00003.npz", probs=probs[::-1], classes=np.array(MODEL_CLASSES[::-1]))
++    np.testing.assert_array_equal(prov.get("DSC00003", 640, 480).probs, probs[list(MODEL_CHANNELS)])
++    np.savez(tmp_path / "DSC00005.npz", probs=probs[:4], classes=np.array(MODEL_CLASSES[:4]))
++    with pytest.raises(ValueError, match="do not provide"):
++        prov.get("DSC00005", 640, 480)
+     with pytest.raises(ValueError, match="aspect ratio"):
+         prov.get("DSC00001", 640, 640)
+     save_probability_npz(tmp_path / "DSC00004.npz", probs, dtype="uint8")
+-    np.testing.assert_allclose(prov.get("DSC00004", 640, 480).probs, probs, atol=0.5 / 255 + 1e-7)
++    np.testing.assert_allclose(prov.get("DSC00004", 640, 480).probs, probs[list(MODEL_CHANNELS)], atol=0.5 / 255 + 1e-7)
+ 
+ 
+ # ---------------------------------------------------------------- sampling
+ def _ramp_map(w=8, h=4):
+-    probs = np.zeros((6, h, w), np.float32)
++    probs = np.zeros((5, h, w), np.float32)
+     xs = np.arange(w, dtype=np.float32)
+-    for c in range(6):
++    for c in range(5):
+         probs[c] = (xs[None, :] + c) / 20.0
+     return ProbabilityMap(probs)
+ 
+@@ -120,20 +123,20 @@ def test_nan_channel_and_valid_mask():
+     pmap.valid = np.ones((4, 8), bool)
+     pmap.valid[:, 7] = False
+     probs, valid = sample_probabilities(pmap, np.array([1.5, 5.5, 7.8]), np.array([1.5, 1.5, 1.5]), 8, 4, "bilinear")
+-    assert np.isfinite(probs[0]).all() and np.isnan(probs[1, 2]) and np.isfinite(probs[1, [0, 1, 3, 4, 5]]).all()
++    assert np.isfinite(probs[0]).all() and np.isnan(probs[1, 2]) and np.isfinite(probs[1, [0, 1, 3, 4]]).all()
+     assert list(valid) == [True, True, False]
+ 
+ 
+ # ---------------------------------------------------------------- fusion
+ def test_accumulation_mean_counts_votes():
+     acc = ChunkAccumulator.zeros(4, n_cameras=2)
+-    p1 = np.array([[0.9, 0.8, 0.1, 0.0, 0.0, 0.0], [0.2] * 6], np.float32)
+-    p2 = np.array([[0.7, 0.2, np.nan, 0.0, 0.0, 0.0]], np.float32)
++    p1 = np.array([[0.9, 0.8, 0.1, 0.0, 0.0], [0.2] * 5], np.float32)
++    p2 = np.array([[0.7, 0.2, np.nan, 0.0, 0.0]], np.float32)
+     acc.add_view(np.array([0, 1]), p1, vote_threshold=0.5)
+     acc.add_view(np.array([0]), p2, vote_threshold=0.5)
+     assert list(acc.n_views) == [2, 1, 0, 0]
+-    assert list(acc.count[0]) == [2, 2, 1, 2, 2, 2]
+-    assert list(acc.votes[0]) == [2, 1, 0, 0, 0, 0]
++    assert list(acc.count[0]) == [2, 2, 1, 2, 2]
++    assert list(acc.votes[0]) == [2, 1, 0, 0, 0]
+     fused = fuse(acc, parse_thresholds("0.5"), min_views=1)
+     assert fused.score[0, 0] == pytest.approx(0.8) and fused.score[0, 1] == pytest.approx(0.5)
+     assert np.isnan(fused.score[2]).all()
+@@ -142,14 +145,14 @@ def test_accumulation_mean_counts_votes():
+ def test_overlapping_classes_and_states():
+     acc = ChunkAccumulator.zeros(5, n_cameras=1)
+     views = np.array([
+-        [0.9, 0.0, 0.0, 0.8, 0.0, 0.0],   # crack + moisture
+-        [0.1] * 6,                        # observed, no damage
+-        [0.1, 0.1, np.nan, 0.1, 0.1, 0.1],  # class 2 never valid -> insufficient
+-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.95],  # surface
++        [0.9, 0.0, 0.0, 0.8, 0.0],   # crack + moisture
++        [0.1] * 5,                   # observed, no damage
++        [0.1, 0.1, np.nan, 0.1, 0.1],  # class 2 never valid -> insufficient
++        [0.0, 0.0, 0.0, 0.0, 0.95],  # surface
+     ], np.float32)
+     acc.add_view(np.array([0, 1, 2, 3]), views, 0.5)
+     fused = fuse(acc, parse_thresholds("0.5"), min_views=1)
+-    assert fused.labels[0].tolist() == [True, False, False, True, False, False]
++    assert fused.labels[0].tolist() == [True, False, False, True, False]
+     assert fused.label_mask[0] == class_bit("crack") | class_bit("moisture")
+     assert list(fused.state) == [STATE_DAMAGE, STATE_OBSERVED_NO_DAMAGE, STATE_INSUFFICIENT_VIEWS,
+                                  STATE_DAMAGE, STATE_NOT_OBSERVED]
+@@ -162,24 +165,24 @@ def test_overlapping_classes_and_states():
+ 
+ def test_dominant_color_uses_threshold_ratio():
+     acc = ChunkAccumulator.zeros(1, 1)
+-    acc.add_view(np.array([0]), np.array([[0.6, 0.0, 0.0, 0.0, 0.0, 0.9]], np.float32), 0.5)
++    acc.add_view(np.array([0]), np.array([[0.6, 0.0, 0.0, 0.0, 0.9]], np.float32), 0.5)
+     thr = parse_thresholds("crack=0.3,surface=0.85")
+     fused = fuse(acc, thr, 1)
+-    assert fused.labels[0, 0] and fused.labels[0, 5]
++    assert fused.labels[0, 0] and fused.labels[0, 4]
+     assert fused.dominant[0] == 0          # 0.6/0.3 = 2.0 > 0.9/0.85
+ 
+ 
+ def test_parse_thresholds():
+-    assert parse_thresholds("0.4").tolist() == pytest.approx([0.4] * 6)
+-    thr = parse_thresholds("crack=0.6,surface=0.7")
+-    assert thr[0] == pytest.approx(0.6) and thr[5] == pytest.approx(0.7) and thr[1] == pytest.approx(0.5)
++    assert parse_thresholds("0.4").tolist() == pytest.approx([0.4] * 5)
++    thr = parse_thresholds("crack=0.6,delamination=0.2,surface=0.7")   # closed class ignored
++    assert thr[0] == pytest.approx(0.6) and thr[4] == pytest.approx(0.7) and thr[1] == pytest.approx(0.5)
+     with pytest.raises(ValueError):
+         parse_thresholds("rust=0.5")
+ 
+ 
+ def test_accumulator_atomic_save(tmp_path):
+     acc = ChunkAccumulator.zeros(3, 2)
+-    acc.add_view(np.array([1]), np.full((1, 6), 0.7, np.float32), 0.5)
++    acc.add_view(np.array([1]), np.full((1, 5), 0.7, np.float32), 0.5)
+     acc.last_batch = 4
+     acc.save_atomic(tmp_path / "chunk_000000.npz")
+     assert not list(tmp_path.glob("*.tmp"))
+diff --git a/scripts/20_calibrate_threshold_min_area.py b/scripts/20_calibrate_threshold_min_area.py
+index bf8d1b0..7985247 100644
+--- a/scripts/20_calibrate_threshold_min_area.py
++++ b/scripts/20_calibrate_threshold_min_area.py
+@@ -46,7 +46,7 @@ import pandas as pd
+ 
+ sys.path.append(str(Path(__file__).resolve().parents[1]))
+ 
+-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES
++from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES
+ from src.data.dacl10k import list_samples
+ from src.eval.postprocess import COUNT_FIELDS, image_counts, metrics_from_counts
+ from src.utils import ensure_dir, get_device, load_config, multilabel_patch_cfg, seed_everything
+@@ -151,7 +151,8 @@ def select_class(counts_c: np.ndarray, thresholds, area_fractions, mode: str, ma
+ 
+ 
+ def summarize(per_class_counts: np.ndarray) -> dict:
+-    """per_class_counts: [C, F] at the selected points -> macro / micro metrics."""
++    """per_class_counts: [C, F] at the selected points -> macro / micro metrics (closed classes excluded)."""
++    per_class_counts = per_class_counts[[c not in CLOSED_DAMAGE_CLASSES for c in UNIFIED_DAMAGE_CLASSES]]
+     per_class = metrics_from_counts(per_class_counts)
+     present = per_class["support_pixels"] > 0
+     summed = metrics_from_counts(per_class_counts.sum(0))
+diff --git a/scripts/23_infer_probability_maps.py b/scripts/23_infer_probability_maps.py
+index f73dacb..a2d71a3 100644
+--- a/scripts/23_infer_probability_maps.py
++++ b/scripts/23_infer_probability_maps.py
+@@ -5,7 +5,8 @@ Runs a trained P1ML checkpoint on the bridge photos with the same
+ sliding-window protocol as 12_evaluate_dacl10k_multilabel_sliding.py
+ (native resolution, Gaussian blending, independent sigmoid per channel) and
+ writes one ``<stem>.npz`` per photo in the format read by the damage3d
+-``files`` provider (keys ``probs`` (6, H', W') and ``classes``).
++``files`` provider (keys ``probs`` (6 model channels, H', W') and ``classes``;
++damage3d and the overlays use the 5 reported classes, delamination closed).
+ 
+ With ``--save-overlays`` it also writes ``<maps dir>/overlays/<stem>_overlay.jpg``
+ for visual inspection: the photo, all classes together, and one panel per
+@@ -58,7 +59,7 @@ import torch.nn.functional as F
+ ROOT = Path(__file__).resolve().parents[1]
+ sys.path.insert(0, str(ROOT))
+ 
+-from damage3d.classes import CLASS_COLORS, DAMAGE_CLASSES  
++from damage3d.classes import CLASS_COLORS, DAMAGE_CLASSES, MODEL_CLASSES  
+ from damage3d.fusion import parse_thresholds  
+ from damage3d.metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras  
+ from damage3d.paths import resolve_path, resolve_project_root  
+@@ -249,12 +250,12 @@ def main(argv=None) -> int:
+     args = parse_args(argv)
+     if args.downsample < 1:
+         raise SystemExit("--downsample must be >= 1.")
+-    if tuple(UNIFIED_DAMAGE_CLASSES) != tuple(DAMAGE_CLASSES):
+-        raise SystemExit(f"Class order mismatch: {UNIFIED_DAMAGE_CLASSES} vs {DAMAGE_CLASSES}.")
++    if tuple(UNIFIED_DAMAGE_CLASSES) != tuple(MODEL_CLASSES):
++        raise SystemExit(f"Class order mismatch: {UNIFIED_DAMAGE_CLASSES} vs {MODEL_CLASSES}.")
+ 
+     run_dir = Path(args.run_dir).resolve()
+     cfg = load_config(run_dir / "config.yaml")
+-    if int(cfg.model.classes) != len(DAMAGE_CLASSES):
++    if int(cfg.model.classes) != len(MODEL_CLASSES):
+         raise SystemExit(f"{run_dir.name} emits {cfg.model.classes} channels: not a P1ML multilabel run.")
+     checkpoint_path = run_dir / args.checkpoint
+     if not checkpoint_path.is_file():
+@@ -328,7 +329,7 @@ def main(argv=None) -> int:
+         "model": {k: cfg.model.get(k) for k in ("arch", "encoder", "classes", "decoder_attention_type")},
+         "patch_size": int(patch.patch_size), "stride": stride, "blend_mode": str(patch.blend_mode),
+         "normalization": {"mean": list(IMAGENET_MEAN), "std": list(IMAGENET_STD)},
+-        "downsample": args.downsample, "dtype": args.dtype, "classes": list(DAMAGE_CLASSES),
++        "downsample": args.downsample, "dtype": args.dtype, "classes": list(MODEL_CLASSES),
+         "exif_orientation": "ignored (raw sensor frame)",
+         "tta": dict(patch.get("tta") or {}) or None,
+     }
+@@ -379,7 +380,7 @@ def main(argv=None) -> int:
+         probs = predict_sliding_window_multilabel(
+             model=model, image=image, device=device, patch_size=int(patch.patch_size),
+             stride=stride, batch_size=batch_size, mean=IMAGENET_MEAN, std=IMAGENET_STD,
+-            n_classes=len(DAMAGE_CLASSES), blend_mode=str(patch.blend_mode),
++            n_classes=len(MODEL_CLASSES), blend_mode=str(patch.blend_mode),
+             tta=patch.get("tta"),
+         )
+         stored = downsample(probs, args.downsample)
+@@ -390,7 +391,7 @@ def main(argv=None) -> int:
+         manifest["maps"][cam.stem] = {
+             "position": position, "label": cam.label, "image": found[cam.stem].name,
+             "image_size": [calib.width, calib.height], "map_size": [stored.shape[2], stored.shape[1]],
+-            "max_prob": [round(float(m), 4) for m in stored.reshape(len(DAMAGE_CLASSES), -1).max(1)],
++            "max_prob": [round(float(m), 4) for m in stored.reshape(len(MODEL_CLASSES), -1).max(1)],
+             "seconds": round(seconds, 1),
+         }
+         manifest["updated_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+diff --git a/scripts/25_pr_curves_confusion.py b/scripts/25_pr_curves_confusion.py
+index 747cc13..d07de0c 100644
+--- a/scripts/25_pr_curves_confusion.py
++++ b/scripts/25_pr_curves_confusion.py
+@@ -51,7 +51,7 @@ import pandas as pd
+ 
+ sys.path.append(str(Path(__file__).resolve().parents[1]))
+ 
+-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES
++from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, REPORTED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES  # noqa: F401
+ from src.data.dacl10k import list_samples
+ from src.eval.postprocess import apply_operating_points
+ from src.utils import ensure_dir, get_device, load_config, multilabel_patch_cfg, seed_everything
+@@ -278,7 +278,8 @@ def main() -> None:
+ 
+     pd.set_option("display.width", 200)
+     summary = ap_table.pivot(index="class", columns="run", values="ap").loc[UNIFIED_DAMAGE_CLASSES]
+-    summary.loc["mAP"] = summary.mean()
++    summary.loc["mAP"] = summary.loc[REPORTED_DAMAGE_CLASSES].mean()      # closed classes excluded
++    summary.loc["mAP_all_channels"] = summary.loc[UNIFIED_DAMAGE_CLASSES].mean()
+     print("\n--- Average Precision (raw probabilities) ---")
+     print(summary.round(3).to_string())
+     for label, data in entries:
+diff --git a/scripts/28_ensemble_calibrate_thresholds.py b/scripts/28_ensemble_calibrate_thresholds.py
+index ec2c306..5938803 100644
+--- a/scripts/28_ensemble_calibrate_thresholds.py
++++ b/scripts/28_ensemble_calibrate_thresholds.py
+@@ -55,7 +55,7 @@ import pandas as pd
+ 
+ sys.path.append(str(Path(__file__).resolve().parents[1]))
+ 
+-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES
++from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, REPORTED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES  # noqa: F401
+ from src.eval.probability_calibration import FORMAT_ENSEMBLE, apply_platt, load_platt, sha256_file
+ 
+ CLASSES = list(UNIFIED_DAMAGE_CLASSES)
+@@ -201,6 +201,7 @@ def evaluate_source(hist_pos, hist_neg, max_prob, gt_present, halves, thresholds
+ def summarize(per_class: pd.DataFrame) -> pd.DataFrame:
+     out = []
+     for (source, protocol), g in per_class.groupby(["source", "protocol"], sort=False):
++        g = g[~g["class"].isin(CLOSED_DAMAGE_CLASSES)]          # closed classes: per-class rows only
+         present = g[g["support"] > 0]
+         out.append({"source": source, "protocol": protocol,
+                     **{f"macro_{k}_present": present[k].mean() for k in ("dice", "iou", "precision", "recall")},
+diff --git a/src/data/class_mapping.py b/src/data/class_mapping.py
+index 2ca9370..21a042d 100644
+--- a/src/data/class_mapping.py
++++ b/src/data/class_mapping.py
+@@ -50,6 +50,16 @@ UNIFIED_DAMAGE_CLASSES: list[str] = [
+     "surface",        # Weathering, Graffiti, Restformwork
+ ]
+ 
++# Classes the network still predicts (auxiliary channel, weights/thresholds/Platt
++# unchanged) but that are CLOSED for every reported result: excluded from the
++# aggregate metrics (macro/micro/FAR, model selection) and from the 3D pipeline.
++# 2026-10-26, supervisor: delamination (Hollowareas) is not assessable from RGB
++# photographs (it is found by hammer sounding / IR thermography).
++CLOSED_DAMAGE_CLASSES: list[str] = ["delamination"]
++REPORTED_DAMAGE_CLASSES: list[str] = [c for c in UNIFIED_DAMAGE_CLASSES if c not in CLOSED_DAMAGE_CLASSES]
++if set(CLOSED_DAMAGE_CLASSES) - set(UNIFIED_DAMAGE_CLASSES):
++    raise RuntimeError(f"CLOSED_DAMAGE_CLASSES {CLOSED_DAMAGE_CLASSES} not in {UNIFIED_DAMAGE_CLASSES}.")
++
+ DACL10K_TO_UNIFIED: dict[str, str] = {
+     "Crack": "crack",
+     "ACrack": "crack",
+diff --git a/src/engine.py b/src/engine.py
+index 75498b9..0969430 100644
+--- a/src/engine.py
++++ b/src/engine.py
+@@ -474,7 +474,22 @@ def fit(
+ 
+ 
+ def _append_csv(path: Path, row: dict) -> None:
+-    """Append one row to a CSV, writing the header on first use."""
++    """Append one row to a CSV, writing the header on first use.
++
++    If the columns changed (e.g. a run resumed after new metrics were added),
++    the file is rewritten with the union of the columns (missing cells empty).
++    """
++    if path.exists():
++        with open(path, newline="", encoding="utf-8") as fh:
++            reader = csv.DictReader(fh)
++            old_fields, old_rows = list(reader.fieldnames or []), list(reader)
++        if old_fields != list(row):
++            fields = old_fields + [k for k in row if k not in old_fields]
++            with open(path, "w", newline="", encoding="utf-8") as fh:
++                writer = csv.DictWriter(fh, fieldnames=fields)
++                writer.writeheader()
++                writer.writerows(old_rows + [row])
++            return
+     write_header = not path.exists()
+     with open(path, "a", newline="", encoding="utf-8") as fh:
+         writer = csv.DictWriter(fh, fieldnames=list(row))
+diff --git a/src/eval/multilabel_metrics.py b/src/eval/multilabel_metrics.py
+index a0ab2a1..87604ec 100644
+--- a/src/eval/multilabel_metrics.py
++++ b/src/eval/multilabel_metrics.py
+@@ -12,6 +12,11 @@ Reported quantities
+ 
+ * `false_alarm_rate_empty_gt`: share of (image, channel) pairs with empty ground truth where the model still predicts that damage.
+ 
++Classes in `CLOSED_DAMAGE_CLASSES` (delamination since 2026-10-26) keep their
++per-class values but are excluded from every aggregate above (macro, micro, FAR,
++hence from model selection); `macro_dice_present_all_channels` reproduces the
++historical 6-channel macro Dice.
++
+ Aliases `dice`, `iou`, `precision`, `recall` map to the micro values so the existing `fit` history writer and console logging keep working unchanged.
+ """
+ 
+@@ -23,7 +28,7 @@ from dataclasses import dataclass, field
+ import torch
+ from tqdm.auto import tqdm
+ 
+-from ..data.class_mapping import UNIFIED_DAMAGE_CLASSES
++from ..data.class_mapping import CLOSED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES
+ 
+ EPS = 1e-7
+ 
+@@ -152,10 +157,15 @@ class MultilabelSegmentationMetrics:
+     def compute(self) -> dict[str, float]:
+         """Return a flat, CSV-friendly dictionary of all metrics."""
+         per_class = self.per_class()
+-        present = [name for name, values in per_class.items() if values["support_pixels"] > 0]
++        # Aggregates (macro, micro, FAR -> model selection) use the reported classes
++        # only; closed classes keep their per-class rows. `macro_dice_present_all_channels`
++        # keeps the historical all-channel value for comparison with older CSVs.
++        reported = [c for c in range(self.n_classes) if self.class_names[c] not in CLOSED_DAMAGE_CLASSES]
++        present_all = [name for name, values in per_class.items() if values["support_pixels"] > 0]
++        present = [name for name in present_all if name not in CLOSED_DAMAGE_CLASSES]
+         n_present = max(len(present), 1)
+ 
+-        tp, fp, fn, tn = (sum(values) for values in (self.tp, self.fp, self.fn, self.tn))
++        tp, fp, fn, tn = (sum(getattr(self, k)[c] for c in reported) for k in ("tp", "fp", "fn", "tn"))
+ 
+         metrics: dict[str, float] = {
+             "macro_dice_present": sum(per_class[n]["dice"] for n in present) / n_present,
+@@ -169,8 +179,13 @@ class MultilabelSegmentationMetrics:
+             "pixel_accuracy": (tp + tn) / (tp + fp + fn + tn + EPS),
+             "n_classes_present": float(len(present)),
+             "false_alarm_rate_empty_gt": (
+-                sum(self.n_images_empty_with_prediction) / max(sum(self.n_images_empty), 1)
++                sum(self.n_images_empty_with_prediction[c] for c in reported)
++                / max(sum(self.n_images_empty[c] for c in reported), 1)
++            ),
++            "macro_dice_present_all_channels": (
++                sum(per_class[n]["dice"] for n in present_all) / max(len(present_all), 1)
+             ),
++            "n_closed_classes": float(self.n_classes - len(reported)),
+         }
+ 
+         # Aliases so engine.fit's history writer / logging work unchanged.
+diff --git a/src/eval/probability_calibration.py b/src/eval/probability_calibration.py
+index f762402..43b2b2e 100644
+--- a/src/eval/probability_calibration.py
++++ b/src/eval/probability_calibration.py
+@@ -191,8 +191,9 @@ def load_platt(path: Path, classes) -> tuple[np.ndarray, np.ndarray, dict]:
+     payload = read_json(path)
+     if payload.get("format") != FORMAT_SINGLE:
+         raise ValueError(f"{path}: format '{payload.get('format')}' != '{FORMAT_SINGLE}'.")
+-    if list(payload.get("classes", [])) != list(classes):
+-        raise ValueError(f"{path}: class order {payload.get('classes')} != {list(classes)}.")
++    missing = [c for c in classes if c not in payload.get("classes", [])]
++    if missing:  # selection by name: a 6-class file serves the 5 reported 3D classes
++        raise ValueError(f"{path}: classes {missing} not in {payload.get('classes')}.")
+     a, b = params_arrays(payload["params"], classes)
+     return a, b, payload
+ 

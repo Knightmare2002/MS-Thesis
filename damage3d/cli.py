@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--member-maps", action="append", default=[], metavar="NAME=DIR",
                    help="maps folder of an ensemble member (repeatable); default <project-root>/damage3d_maps/<run name>")
     g.add_argument("--synthetic-pattern", choices=("regions", "mask"), default="regions",
-                   help="'regions': six overlapping Gaussian bumps; 'mask': prototype PNG mask")
+                   help="'regions': one Gaussian bump per mapped class (overlapping); 'mask': prototype PNG mask")
     g.add_argument("--synthetic-downsample", type=int, default=8, help="resolution divisor of synthetic maps")
     g.add_argument("--synthetic-mask-pattern", default="{stem}_mask_test.png",
                    help="mask file name in the project root, for --synthetic-pattern mask")

@@ -46,7 +46,7 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES
+from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES
 from src.data.dacl10k import list_samples
 from src.eval.postprocess import COUNT_FIELDS, image_counts, metrics_from_counts
 from src.utils import ensure_dir, get_device, load_config, multilabel_patch_cfg, seed_everything
@@ -151,7 +151,8 @@ def select_class(counts_c: np.ndarray, thresholds, area_fractions, mode: str, ma
 
 
 def summarize(per_class_counts: np.ndarray) -> dict:
-    """per_class_counts: [C, F] at the selected points -> macro / micro metrics."""
+    """per_class_counts: [C, F] at the selected points -> macro / micro metrics (closed classes excluded)."""
+    per_class_counts = per_class_counts[[c not in CLOSED_DAMAGE_CLASSES for c in UNIFIED_DAMAGE_CLASSES]]
     per_class = metrics_from_counts(per_class_counts)
     present = per_class["support_pixels"] > 0
     summed = metrics_from_counts(per_class_counts.sum(0))

@@ -15,18 +15,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.data.class_mapping import UNIFIED_DAMAGE_CLASSES  # noqa: E402
+from src.data.class_mapping import CLOSED_DAMAGE_CLASSES, UNIFIED_DAMAGE_CLASSES  # noqa: E402
 
-DAMAGE_CLASSES: tuple[str, ...] = tuple(UNIFIED_DAMAGE_CLASSES)
+# MODEL_CLASSES: channels written by the network / scripts 23-28 (maps, Platt, thresholds).
+# DAMAGE_CLASSES: channels mapped in 3D = MODEL_CLASSES minus the closed classes
+# (delamination since 2026-10-26). Providers select them BY NAME from the maps.
+MODEL_CLASSES: tuple[str, ...] = tuple(UNIFIED_DAMAGE_CLASSES)
+CLOSED_CLASSES: tuple[str, ...] = tuple(CLOSED_DAMAGE_CLASSES)
+DAMAGE_CLASSES: tuple[str, ...] = tuple(c for c in MODEL_CLASSES if c not in CLOSED_CLASSES)
 NUM_CLASSES: int = len(DAMAGE_CLASSES)
+MODEL_CHANNELS: tuple[int, ...] = tuple(MODEL_CLASSES.index(c) for c in DAMAGE_CLASSES)
 
-# Order verified in the repository on 2026-09-30. If the taxonomy changes, this
-# guard fails loudly instead of silently permuting the 3D channels.
-_EXPECTED_ORDER = ("crack", "spalling", "corrosion", "moisture", "delamination", "surface")
-if DAMAGE_CLASSES != _EXPECTED_ORDER:
+# Orders verified in the repository (2026-09-30, closure 2026-10-26). If the
+# taxonomy changes, this guard fails loudly instead of silently permuting channels.
+_EXPECTED_MODEL_ORDER = ("crack", "spalling", "corrosion", "moisture", "delamination", "surface")
+_EXPECTED_ORDER = ("crack", "spalling", "corrosion", "moisture", "surface")
+if MODEL_CLASSES != _EXPECTED_MODEL_ORDER or DAMAGE_CLASSES != _EXPECTED_ORDER:
     raise RuntimeError(
-        f"UNIFIED_DAMAGE_CLASSES changed: {DAMAGE_CLASSES} != {_EXPECTED_ORDER}. "
-        "Update damage3d (colors, docs, tests) before running the 3D pipeline."
+        f"Class order changed: model {MODEL_CLASSES} / 3D {DAMAGE_CLASSES}, expected "
+        f"{_EXPECTED_MODEL_ORDER} / {_EXPECTED_ORDER}. Update damage3d (colors, docs, tests) first."
     )
 
 # Visual convention (RGB, 0-255). Distinct from the state colors below.
@@ -35,7 +42,7 @@ CLASS_COLORS: dict[str, tuple[int, int, int]] = {
     "spalling": (255, 127, 0),       # orange
     "corrosion": (166, 86, 40),      # brown
     "moisture": (0, 190, 255),       # cyan
-    "delamination": (152, 78, 163),  # purple
+    "delamination": (152, 78, 163),  # purple (closed: only in 2D overlays of model channels)
     "surface": (77, 175, 74),        # green
 }
 

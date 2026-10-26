@@ -117,10 +117,10 @@ def test_inference_maps_feed_damage3d(project_id, tmp_path):
 def test_render_overlay_marks_only_positive_classes():
     script = _load_script()
     image = np.full((60, 80, 3), 128, np.uint8)
-    probs = np.zeros((6, 30, 40), np.float32)
+    probs = np.zeros((5, 30, 40), np.float32)   # reported classes (delamination closed)
     probs[1] = 0.9                       # spalling everywhere
-    probs[4, :, :20] = 0.9               # delamination on the left half (overlaps spalling)
-    thresholds = np.full(6, 0.5, np.float32)
+    probs[4, :, :20] = 0.9               # surface on the left half (overlaps spalling)
+    thresholds = np.full(5, 0.5, np.float32)
     grid, boxes = script.render_overlay(image, probs, thresholds, "t", panel_width=80, alpha=0.5)
 
     def panel(name):
@@ -130,7 +130,8 @@ def test_render_overlay_marks_only_positive_classes():
     photo = panel("photo")
     assert np.array_equal(panel("crack"), photo)          # no crack -> untouched photo
     assert (panel("spalling") != photo).any(axis=2).all()  # spalling tinted everywhere
-    delam = panel("delamination")
-    assert (delam[:, :35] != photo[:, :35]).any(axis=2).all() and np.array_equal(delam[:, 45:], photo[:, 45:])
+    assert "delamination" not in boxes
+    surf = panel("surface")
+    assert (surf[:, :35] != photo[:, :35]).any(axis=2).all() and np.array_equal(surf[:, 45:], photo[:, 45:])
     both = panel("all")
     assert not np.array_equal(both[:, :35], both[:, 45:])  # overlap gets a different (mean) color

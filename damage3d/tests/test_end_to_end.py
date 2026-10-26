@@ -137,7 +137,8 @@ def test_files_provider_end_to_end(project_id, tmp_path):
     from damage3d.providers import save_probability_npz
     probs = np.zeros((6, 48, 64), np.float32)
     probs[1] = 0.9          # spalling everywhere
-    probs[4, :, :32] = 0.8  # delamination on the left half, overlapping spalling
+    probs[5, :, :32] = 0.8  # surface on the left half, overlapping spalling
+    probs[4] = 0.95         # delamination (closed class): present in the file, never mapped
     maps = tmp_path / "maps"
     maps.mkdir()
     save_probability_npz(maps / "DSC01020.npz", probs)
@@ -148,7 +149,8 @@ def test_files_provider_end_to_end(project_id, tmp_path):
     d = _load_shards(out)
     seen = d["n_views"] > 0
     assert (d["label_mask"][seen] & 2).all()                           # spalling bit on every seen point
-    assert ((d["label_mask"][seen] & 16) > 0).any() and ((d["label_mask"][seen] & 16) == 0).any()
+    assert ((d["label_mask"][seen] & 16) > 0).any() and ((d["label_mask"][seen] & 16) == 0).any()  # surface
+    assert (d["label_mask"][seen] < 32).all()                          # 5 classes: no delamination bit
     assert (d["state"][seen] == STATE_DAMAGE).all()
 
 
