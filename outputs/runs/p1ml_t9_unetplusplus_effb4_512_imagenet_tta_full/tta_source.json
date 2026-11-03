@@ -1,0 +1,18 @@
+{
+  "source_run": "p1ml_t9_unetplusplus_effb4_512_imagenet",
+  "source_checkpoint": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t9_unetplusplus_effb4_512_imagenet\\best.pt",
+  "checkpoint": "best.pt",
+  "checkpoint_sha256": "d9ec28faaf3eb75cb137b4eb04d25518d05cde2d05f62c63ad1b0a7f24f2954a",
+  "checkpoint_link": "hardlink",
+  "tta": {
+    "hflip": true,
+    "vflip": false,
+    "scales": [
+      0.75,
+      1.0,
+      1.25
+    ]
+  },
+  "n_views_per_patch": 6,
+  "note": "same weights as the source run; probabilities, thresholds and Platt parameters must be recomputed (scripts 12, 17, 25, 27)."
+}

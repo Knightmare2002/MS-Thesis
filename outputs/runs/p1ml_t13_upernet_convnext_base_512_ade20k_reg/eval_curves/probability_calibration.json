@@ -1,0 +1,145 @@
+{
+  "format": "p1ml_platt_calibration_v1",
+  "method": "platt (per class): p' = sigmoid(a * logit(p) + b), a > 0; maximum likelihood on validation pixels",
+  "classes": [
+    "crack",
+    "spalling",
+    "corrosion",
+    "moisture",
+    "delamination",
+    "surface"
+  ],
+  "run_dir": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t13_upernet_convnext_base_512_ade20k_reg",
+  "run_name": "p1ml_t13_upernet_convnext_base_512_ade20k_reg",
+  "created_utc": "2026-11-01T20:10:15+00:00",
+  "checkpoint": {
+    "name": "best.pt",
+    "epoch": "29",
+    "sha256": "3d8a6ff88fa6fd97649eb5f6ad882a8df2808608a18b00df33cff1f732bd3ac5"
+  },
+  "fit": {
+    "split": "validation",
+    "n_images": 975,
+    "histograms": "\\\\?\\C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t13_upernet_convnext_base_512_ade20k_reg\\eval_curves\\curves_histograms.npz",
+    "bins": 1000,
+    "bin_representative": "logit of the bin centre"
+  },
+  "params": {
+    "crack": {
+      "a": 0.5954480700522946,
+      "b": -2.6995244485027174
+    },
+    "spalling": {
+      "a": 0.592090751068969,
+      "b": -2.2367785483636613
+    },
+    "corrosion": {
+      "a": 0.6859232965492859,
+      "b": -2.0369824909562575
+    },
+    "moisture": {
+      "a": 0.5630265483207884,
+      "b": -2.2529491090187106
+    },
+    "delamination": {
+      "a": 0.692308446238465,
+      "b": -2.1740076961638755
+    },
+    "surface": {
+      "a": 0.8012702389406451,
+      "b": -1.5019434705291914
+    }
+  },
+  "thresholds_source": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t13_upernet_convnext_base_512_ade20k_reg\\eval_multilabel_sliding_calibrated\\thresholds_per_class_validation_calibrated.json",
+  "thresholds_raw": {
+    "crack": 0.9,
+    "spalling": 0.9,
+    "corrosion": 0.8,
+    "moisture": 0.8,
+    "delamination": 0.8,
+    "surface": 0.6
+  },
+  "thresholds_calibrated": {
+    "crack": 0.1992176383860823,
+    "spalling": 0.2817450110419606,
+    "corrosion": 0.2523551032519364,
+    "moisture": 0.1865737623991357,
+    "delamination": 0.22894738419840477,
+    "surface": 0.23558188570426225
+  },
+  "diagnostics": {
+    "crack": {
+      "temperature": 1.6794075760665006,
+      "n_positive_pixels": 44594132,
+      "n_negative_pixels": 3634258729,
+      "nll_raw": 0.0707048125996835,
+      "nll_platt": 0.02856233644673269,
+      "ece_raw": 0.026523462902231034,
+      "ece_platt": 0.0015539336638713654,
+      "newton_iterations": 7,
+      "converged": true,
+      "dice_at_threshold_from_histograms": 0.5492330067550915
+    },
+    "spalling": {
+      "temperature": 1.6889302833975803,
+      "n_positive_pixels": 109847660,
+      "n_negative_pixels": 3569005201,
+      "nll_raw": 0.16180360073676112,
+      "nll_platt": 0.07896375198575921,
+      "ece_raw": 0.06430198429632167,
+      "ece_platt": 0.005173320377615471,
+      "newton_iterations": 8,
+      "converged": true,
+      "dice_at_threshold_from_histograms": 0.5321142139055837
+    },
+    "corrosion": {
+      "temperature": 1.4578889578918781,
+      "n_positive_pixels": 90796377,
+      "n_negative_pixels": 3588056484,
+      "nll_raw": 0.1085800005044834,
+      "nll_platt": 0.06037468277795403,
+      "ece_raw": 0.04495563660530429,
+      "ece_platt": 0.0048490960033545135,
+      "newton_iterations": 7,
+      "converged": true,
+      "dice_at_threshold_from_histograms": 0.5630366230275191
+    },
+    "moisture": {
+      "temperature": 1.7761151813932634,
+      "n_positive_pixels": 115065870,
+      "n_negative_pixels": 3563786991,
+      "nll_raw": 0.18276618169275227,
+      "nll_platt": 0.08942624447838608,
+      "ece_raw": 0.07670688859999504,
+      "ece_platt": 0.0030801154853402905,
+      "newton_iterations": 8,
+      "converged": true,
+      "dice_at_threshold_from_histograms": 0.43902246698275105
+    },
+    "delamination": {
+      "temperature": 1.444442871430101,
+      "n_positive_pixels": 68278737,
+      "n_negative_pixels": 3610574124,
+      "nll_raw": 0.08447988454974431,
+      "nll_platt": 0.043927386696325774,
+      "ece_raw": 0.03518373484481146,
+      "ece_platt": 0.0016864241498945462,
+      "newton_iterations": 7,
+      "converged": true,
+      "dice_at_threshold_from_histograms": 0.5590974463692023
+    },
+    "surface": {
+      "temperature": 1.2480183980402098,
+      "n_positive_pixels": 412197294,
+      "n_negative_pixels": 3266655567,
+      "nll_raw": 0.32719142662708756,
+      "nll_platt": 0.23667628403964455,
+      "ece_raw": 0.12582562576005674,
+      "ece_platt": 0.005571928044210331,
+      "newton_iterations": 5,
+      "converged": true,
+      "dice_at_threshold_from_histograms": 0.5364268060674671
+    }
+  },
+  "note": "Monotone per-class map: with thresholds_calibrated the binary masks of THIS model are identical to the raw masks at thresholds_raw. Probability maps stay RAW on disk; the calibration is applied when maps are read (damage3d) or combined (scripts/28)."
+}
