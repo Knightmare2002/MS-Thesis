@@ -1,0 +1,455 @@
+{
+  "format": "p1ml_platt_ensemble_v1",
+  "name": "T9+T12+T13",
+  "classes": [
+    "crack",
+    "spalling",
+    "corrosion",
+    "moisture",
+    "delamination",
+    "surface"
+  ],
+  "created_utc": "2026-11-03T10:28:55+00:00",
+  "combination": "p_ens = sum_m w_m * sigmoid(a_mc * logit(p_m) + b_mc), weights normalised to 1",
+  "members": [
+    {
+      "name": "T9",
+      "run_dir": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t9_unetplusplus_effb4_512_imagenet",
+      "checkpoint": "best.pt",
+      "checkpoint_epoch": "21",
+      "checkpoint_sha256": "d9ec28faaf3eb75cb137b4eb04d25518d05cde2d05f62c63ad1b0a7f24f2954a",
+      "calibration_file": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t9_unetplusplus_effb4_512_imagenet\\eval_curves\\probability_calibration.json",
+      "calibration_sha256": "56547af7c653a592c7b6e93d893d50c1c8a44919f020ab4dda1e7cd2345a0ccc",
+      "weight_input": 0.5,
+      "weight": 0.2,
+      "params": {
+        "crack": {
+          "a": 1.0604362675692298,
+          "b": -2.5094007702266086
+        },
+        "spalling": {
+          "a": 0.9346344021823245,
+          "b": -1.7339470408535558
+        },
+        "corrosion": {
+          "a": 1.0773452506774814,
+          "b": -1.236283384556729
+        },
+        "moisture": {
+          "a": 0.8780836325151112,
+          "b": -2.062052293878558
+        },
+        "delamination": {
+          "a": 1.3146724088016652,
+          "b": -1.4254029603284935
+        },
+        "surface": {
+          "a": 1.0027664705221906,
+          "b": -1.3191673220135067
+        }
+      }
+    },
+    {
+      "name": "T12",
+      "run_dir": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t12_upernet_convnext_base_512_ade20k",
+      "checkpoint": "best.pt",
+      "checkpoint_epoch": "20",
+      "checkpoint_sha256": "12080b59ea2d5014fded8222e9c20ca761cee36b377fd947f9c07e08bf819a01",
+      "calibration_file": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t12_upernet_convnext_base_512_ade20k\\eval_curves\\probability_calibration.json",
+      "calibration_sha256": "629a0dcc64652fd44d0919cded7121770e51d585d5f67cc8000af4bb4501e206",
+      "weight_input": 1.0,
+      "weight": 0.4,
+      "params": {
+        "crack": {
+          "a": 0.6397006202893379,
+          "b": -2.6984726239867562
+        },
+        "spalling": {
+          "a": 0.6601633514982135,
+          "b": -1.9432375143359288
+        },
+        "corrosion": {
+          "a": 0.6888860789508109,
+          "b": -1.9383376141400626
+        },
+        "moisture": {
+          "a": 0.5897576587142169,
+          "b": -2.224677477289748
+        },
+        "delamination": {
+          "a": 0.7620311594188457,
+          "b": -2.006879984291255
+        },
+        "surface": {
+          "a": 0.8051640832016833,
+          "b": -1.384541721257399
+        }
+      }
+    },
+    {
+      "name": "T13",
+      "run_dir": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t13_upernet_convnext_base_512_ade20k_reg",
+      "checkpoint": "best.pt",
+      "checkpoint_epoch": "29",
+      "checkpoint_sha256": "3d8a6ff88fa6fd97649eb5f6ad882a8df2808608a18b00df33cff1f732bd3ac5",
+      "calibration_file": "C:\\Users\\Samuele_Caruso\\OneDrive - UMass Lowell\\Desktop\\crack-segmentation-baseline\\outputs\\runs\\p1ml_t13_upernet_convnext_base_512_ade20k_reg\\eval_curves\\probability_calibration.json",
+      "calibration_sha256": "20af3cab46de89dbf04b6ee011f68e5221dd1a44bd0bceb819917718845087de",
+      "weight_input": 1.0,
+      "weight": 0.4,
+      "params": {
+        "crack": {
+          "a": 0.5954480700522946,
+          "b": -2.6995244485027174
+        },
+        "spalling": {
+          "a": 0.592090751068969,
+          "b": -2.2367785483636613
+        },
+        "corrosion": {
+          "a": 0.6859232965492859,
+          "b": -2.0369824909562575
+        },
+        "moisture": {
+          "a": 0.5630265483207884,
+          "b": -2.2529491090187106
+        },
+        "delamination": {
+          "a": 0.692308446238465,
+          "b": -2.1740076961638755
+        },
+        "surface": {
+          "a": 0.8012702389406451,
+          "b": -1.5019434705291914
+        }
+      }
+    }
+  ],
+  "split": "validation",
+  "n_images": 975,
+  "seed": 42,
+  "threshold_grid": [
+    0.02,
+    0.03,
+    0.04,
+    0.05,
+    0.06,
+    0.07,
+    0.08,
+    0.09,
+    0.1,
+    0.11,
+    0.12,
+    0.13,
+    0.14,
+    0.15,
+    0.16,
+    0.17,
+    0.18,
+    0.19,
+    0.2,
+    0.21,
+    0.22,
+    0.23,
+    0.24,
+    0.25,
+    0.26,
+    0.27,
+    0.28,
+    0.29,
+    0.3,
+    0.31,
+    0.32,
+    0.33,
+    0.34,
+    0.35,
+    0.36,
+    0.37,
+    0.38,
+    0.39,
+    0.4,
+    0.41,
+    0.42,
+    0.43,
+    0.44,
+    0.45,
+    0.46,
+    0.47,
+    0.48,
+    0.49,
+    0.5,
+    0.51,
+    0.52,
+    0.53,
+    0.54,
+    0.55,
+    0.56,
+    0.57,
+    0.58,
+    0.59,
+    0.6,
+    0.61,
+    0.62,
+    0.63,
+    0.64,
+    0.65,
+    0.66,
+    0.67,
+    0.68,
+    0.69,
+    0.7,
+    0.71,
+    0.72,
+    0.73,
+    0.74,
+    0.75,
+    0.76,
+    0.77,
+    0.78,
+    0.79,
+    0.8,
+    0.81,
+    0.82,
+    0.83,
+    0.84,
+    0.85,
+    0.86,
+    0.87,
+    0.88,
+    0.89,
+    0.9,
+    0.91,
+    0.92,
+    0.93,
+    0.94,
+    0.95,
+    0.96,
+    0.97,
+    0.98
+  ],
+  "selection": "per class argmax Dice (dataset-level pixel counts) on the whole split; ties -> highest threshold",
+  "thresholds": {
+    "crack": 0.22,
+    "spalling": 0.25,
+    "corrosion": 0.28,
+    "moisture": 0.19,
+    "delamination": 0.26,
+    "surface": 0.25
+  },
+  "thresholds_members_calibrated_scale": {
+    "T9": {
+      "crack": 0.22,
+      "spalling": 0.27,
+      "corrosion": 0.25,
+      "moisture": 0.16,
+      "delamination": 0.31,
+      "surface": 0.25
+    },
+    "T12": {
+      "crack": 0.2,
+      "spalling": 0.27,
+      "corrosion": 0.29,
+      "moisture": 0.2,
+      "delamination": 0.29,
+      "surface": 0.28
+    },
+    "T13": {
+      "crack": 0.23,
+      "spalling": 0.26,
+      "corrosion": 0.29,
+      "moisture": 0.21,
+      "delamination": 0.28,
+      "surface": 0.26
+    }
+  },
+  "validation_metrics_optimistic": {
+    "crack": {
+      "dice": 0.5509392228460053,
+      "iou": 0.3802043582520182,
+      "precision": 0.5149121091747532,
+      "recall": 0.5923870656345548,
+      "far": 0.25544267053701014
+    },
+    "spalling": {
+      "dice": 0.5603849529663428,
+      "iou": 0.38926027768397,
+      "precision": 0.5715425897691385,
+      "recall": 0.5496546125789116,
+      "far": 0.48423423423423423
+    },
+    "corrosion": {
+      "dice": 0.5810696509117914,
+      "iou": 0.40951245512873935,
+      "precision": 0.6437648486073901,
+      "recall": 0.5295022950089737,
+      "far": 0.3877551020408163
+    },
+    "moisture": {
+      "dice": 0.4403848984957935,
+      "iou": 0.2823676803789949,
+      "precision": 0.4404953295891768,
+      "recall": 0.44027452275813844,
+      "far": 0.4
+    },
+    "delamination": {
+      "dice": 0.6253520509012583,
+      "iou": 0.4549179674048595,
+      "precision": 0.617357873287682,
+      "recall": 0.6335559780492132,
+      "far": 0.1475609756097561
+    },
+    "surface": {
+      "dice": 0.5461817212218582,
+      "iou": 0.3756877521727786,
+      "precision": 0.5130802587830103,
+      "recall": 0.5838488304098377,
+      "far": 0.7325842696629213
+    }
+  },
+  "summary": [
+    {
+      "source": "T9",
+      "protocol": "full_validation_optimistic",
+      "macro_dice_present": 0.4477202537668596,
+      "macro_iou_present": 0.29093980072932685,
+      "macro_precision_present": 0.426911458295326,
+      "macro_recall_present": 0.48067066993073687,
+      "false_alarm_rate_empty_gt": 0.7170980678089682
+    },
+    {
+      "source": "T9",
+      "protocol": "fold0_test",
+      "macro_dice_present": 0.4451341833583221,
+      "macro_iou_present": 0.289095430729854,
+      "macro_precision_present": 0.4273816152159101,
+      "macro_recall_present": 0.48830224877928946,
+      "false_alarm_rate_empty_gt": 0.7291970802919708
+    },
+    {
+      "source": "T9",
+      "protocol": "fold1_test",
+      "macro_dice_present": 0.43317415206104554,
+      "macro_iou_present": 0.2790092951661352,
+      "macro_precision_present": 0.41347200906640563,
+      "macro_recall_present": 0.48138357295666595,
+      "false_alarm_rate_empty_gt": 0.7166788055353241
+    },
+    {
+      "source": "T12",
+      "protocol": "full_validation_optimistic",
+      "macro_dice_present": 0.5099816140939032,
+      "macro_iou_present": 0.34364646013923866,
+      "macro_precision_present": 0.5155589746904712,
+      "macro_recall_present": 0.5083076923516051,
+      "false_alarm_rate_empty_gt": 0.46518410499453156
+    },
+    {
+      "source": "T12",
+      "protocol": "fold0_test",
+      "macro_dice_present": 0.520400339475846,
+      "macro_iou_present": 0.3548814459003746,
+      "macro_precision_present": 0.5098528415174713,
+      "macro_recall_present": 0.5363118354648309,
+      "false_alarm_rate_empty_gt": 0.4854014598540146
+    },
+    {
+      "source": "T12",
+      "protocol": "fold1_test",
+      "macro_dice_present": 0.4784162176660674,
+      "macro_iou_present": 0.31595196224154254,
+      "macro_precision_present": 0.4914785636139086,
+      "macro_recall_present": 0.48158243294642766,
+      "false_alarm_rate_empty_gt": 0.4537509104151493
+    },
+    {
+      "source": "T13",
+      "protocol": "full_validation_optimistic",
+      "macro_dice_present": 0.5260758821667831,
+      "macro_iou_present": 0.35808489660363774,
+      "macro_precision_present": 0.5205865979619066,
+      "macro_recall_present": 0.5336519942694605,
+      "false_alarm_rate_empty_gt": 0.4254465913233686
+    },
+    {
+      "source": "T13",
+      "protocol": "fold0_test",
+      "macro_dice_present": 0.5426955603953604,
+      "macro_iou_present": 0.375029418449174,
+      "macro_precision_present": 0.5401691470316539,
+      "macro_recall_present": 0.5482766211447277,
+      "false_alarm_rate_empty_gt": 0.4343065693430657
+    },
+    {
+      "source": "T13",
+      "protocol": "fold1_test",
+      "macro_dice_present": 0.4900318817158308,
+      "macro_iou_present": 0.3267291204054549,
+      "macro_precision_present": 0.4846028306484428,
+      "macro_recall_present": 0.5115802304568304,
+      "false_alarm_rate_empty_gt": 0.42316096139839765
+    },
+    {
+      "source": "ensemble",
+      "protocol": "full_validation_optimistic",
+      "macro_dice_present": 0.5357920892883582,
+      "macro_iou_present": 0.3674065047233002,
+      "macro_precision_present": 0.5367590271846938,
+      "macro_recall_present": 0.5391334652780833,
+      "false_alarm_rate_empty_gt": 0.4290922347794386
+    },
+    {
+      "source": "ensemble",
+      "protocol": "fold0_test",
+      "macro_dice_present": 0.5425104615026062,
+      "macro_iou_present": 0.3753972319158595,
+      "macro_precision_present": 0.534550946168612,
+      "macro_recall_present": 0.5584174907966569,
+      "false_alarm_rate_empty_gt": 0.45182481751824816
+    },
+    {
+      "source": "ensemble",
+      "protocol": "fold1_test",
+      "macro_dice_present": 0.5025757669273172,
+      "macro_iou_present": 0.3373324360712645,
+      "macro_precision_present": 0.5090314578987141,
+      "macro_recall_present": 0.5206113687296028,
+      "false_alarm_rate_empty_gt": 0.4289876183539694
+    },
+    {
+      "source": "T9",
+      "protocol": "mean_of_folds_test",
+      "macro_dice_present": 0.43915416770968385,
+      "macro_iou_present": 0.28405236294799463,
+      "macro_precision_present": 0.42042681214115785,
+      "macro_recall_present": 0.4848429108679777,
+      "false_alarm_rate_empty_gt": 0.7229379429136475
+    },
+    {
+      "source": "T12",
+      "protocol": "mean_of_folds_test",
+      "macro_dice_present": 0.4994082785709567,
+      "macro_iou_present": 0.3354167040709586,
+      "macro_precision_present": 0.50066570256569,
+      "macro_recall_present": 0.5089471342056293,
+      "false_alarm_rate_empty_gt": 0.469576185134582
+    },
+    {
+      "source": "T13",
+      "protocol": "mean_of_folds_test",
+      "macro_dice_present": 0.5163637210555956,
+      "macro_iou_present": 0.3508792694273144,
+      "macro_precision_present": 0.5123859888400484,
+      "macro_recall_present": 0.529928425800779,
+      "false_alarm_rate_empty_gt": 0.4287337653707317
+    },
+    {
+      "source": "ensemble",
+      "protocol": "mean_of_folds_test",
+      "macro_dice_present": 0.5225431142149617,
+      "macro_iou_present": 0.356364833993562,
+      "macro_precision_present": 0.521791202033663,
+      "macro_recall_present": 0.5395144297631298,
+      "false_alarm_rate_empty_gt": 0.4404062179361088
+    }
+  ],
+  "note": "thresholds are selected on the same split they are evaluated on (OPTIMISTIC, as scripts/17); the honest estimate is protocol 'mean_of_folds_test'. Held-out use (Lincoln Street) must reuse these frozen thresholds without re-selection."
+}

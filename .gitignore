@@ -24,6 +24,7 @@ outputs/*
 *.jpg
 *.jpeg
 
+!outputs/**/ensembles
 !outputs/runs/**/curves.png
 !outputs/runs/**/qualitative_overview_multilabel.png
 !outputs/runs/**/pr_curves.png
