@@ -163,6 +163,7 @@ Thresholds (`--thresholds 0.5` or `crack=0.6,spalling=0.7,...`) and `--min-views
 
 `--export-scope all|observed|damage` controls which points are written.
 `--normals` is an export option: changing it with `--resume` on a finished run only rewrites the outputs (no re-accumulation).
+For runs exported before `--normals` existed: `python -m damage3d.add_normals --fused <run>/outputs/fused_points.ply --source <project>/bridge_3dpc_point_cloud.ply` writes `fused_points_normals.ply` next to it (inputs untouched, coordinates checked against the source).
 
 Run-level files:
 - `manifest.json` (fingerprint);

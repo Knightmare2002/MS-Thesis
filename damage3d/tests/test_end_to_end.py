@@ -197,3 +197,23 @@ def test_normals_toggle_on_resume_only_reexports(project_tf, tmp_path):
     assert summary["normals"] == "source" and "normal" in after
     np.testing.assert_array_equal(before["score"], after["score"])
     np.testing.assert_array_equal(before["state"], after["state"])
+
+
+def test_add_normals_to_existing_export_matches_direct_export(project_tf, tmp_path):
+    from damage3d.add_normals import main as add_normals_main
+    src_ply = project_tf["root"] / "bridge_3dpc_point_cloud.ply"
+    direct, legacy = tmp_path / "direct", tmp_path / "legacy"
+    _run(project_tf, direct, "--camera", "DSC01020", "--max-points", "3000")
+    _run(project_tf, legacy, "--camera", "DSC01020", "--max-points", "3000", "--normals", "none")
+    fused = legacy / "outputs" / "fused_points.ply"
+    before = fused.read_bytes()
+    assert add_normals_main(["--fused", str(fused), "--source", str(src_ply), "--chunk", "700"]) == 0
+    assert fused.read_bytes() == before                                   # input untouched
+    a = PlyPointSource(direct / "outputs" / "fused_points.ply")
+    b = PlyPointSource(legacy / "outputs" / "fused_points_normals.ply")
+    assert a.header.dtype == b.header.dtype
+    assert np.asarray(a._mm).tobytes() == np.asarray(b._mm).tobytes()
+    a.close()
+    b.close()
+    with pytest.raises(RuntimeError):
+        add_normals_main(["--fused", str(fused), "--source", str(src_ply), "--out", str(fused)])
