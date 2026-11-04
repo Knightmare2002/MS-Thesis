@@ -69,6 +69,7 @@ class RunConfig:
     thresholds: str | None = None
     min_views: int = 1
     export_scope: str = "all"
+    normals: str = "auto"  # auto | source | none
     csv_max_points: int = 200_000
     dry_run: bool = False
     resume: bool = False
@@ -215,7 +216,7 @@ def plan(cfg: RunConfig) -> dict:
     ranges = _chunk_ranges(selection.size, cfg.point_chunk_size)
     n_sel = selection.size
     acc_bytes = n_sel * (NUM_CLASSES * (4 + 2 + 2) + 2)
-    ply_bytes = n_sel * ply_dtype("<u4").itemsize
+    ply_bytes = n_sel * ply_dtype("<u4", cfg.normals != "none" and ply.has_normals).itemsize
     chunk_ram = cfg.point_chunk_size * (24 * 3 + 8 * 6 + NUM_CLASSES * 8 * 2 + 64)
     return {
         "project": project, "ordered": ordered, "selected": selected, "ply": ply,
@@ -359,8 +360,9 @@ def run(cfg: RunConfig) -> dict:
             "thresholds_source": thresholds_source,
             "frame": frame_record, "occlusion": tolerance_record, "warnings": cfg.warnings,
             "interpolation": cfg.interpolation, "n_cameras": len(selected), "run_dir": str(rd.path)}
+    export_normals = _resolve_normals(cfg.normals, ply)
     summary = export_run(rd, ranges, selection, ply, thresholds, cfg.min_views, cfg.export_scope,
-                         cfg.csv_max_points, len(selected), camera_rows, meta)
+                         cfg.csv_max_points, len(selected), camera_rows, meta, normals=export_normals)
     ply.close()
     log.info("States: %s", summary["state_counts"])
     log.info("Labels: %s", summary["label_counts"])
@@ -458,3 +460,18 @@ def _attach_file_log(path: Path) -> None:
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(handler)
+
+
+def _resolve_normals(mode: str, ply) -> bool:
+    """Decide whether nx/ny/nz of the source PLY are copied into fused_points.ply."""
+    if mode == "none":
+        return False
+    if ply.has_normals:
+        log.info("Normals: copying nx, ny, nz from %s", ply.path.name)
+        return True
+    if mode == "source":
+        raise RuntimeError(f"--normals source requested but {ply.path} has no nx/ny/nz vertex properties "
+                           f"(header: {[p[0] for p in ply.header.properties]}).")
+    log.warning("Normals: %s has no nx/ny/nz; fused_points.ply is written without normals "
+                "(viewers will estimate them with arbitrary orientation).", ply.path.name)
+    return False

@@ -149,11 +149,12 @@ Thresholds (`--thresholds 0.5` or `crack=0.6,spalling=0.7,...`) and `--min-views
 
 - **`fused_points.ply`**, binary little endian. Fields:
   - `x y z`: float32, identical to the source PLY, so it overlays the original cloud;
+  - `nx ny nz`: float32, copied unchanged from the source PLY (`--normals auto|source|none`, default `auto` = when the source has them). Without them Metashape and CloudCompare estimate normals with arbitrary sign, which gives inverted shading on some surfaces;
   - `red green blue`;
   - `state`, `label_mask`, `n_classes`, `n_views`;
   - `score_<class>` x6 (NaN when unobserved) and `views_<class>` x6;
   - `source_index`: the record index in the original PLY.
-- **`fused/chunk_XXXXXX.npz`**: machine-readable arrays `source_index, xyz, score(n,5), views(n,5), votes(n,5), n_views, label_mask, state, rgb`. `classes.json` gives the channel order.
+- **`fused/chunk_XXXXXX.npz`**: machine-readable arrays `source_index, xyz, [normal], score(n,5), views(n,5), votes(n,5), n_views, label_mask, state, rgb`. `classes.json` gives the channel order.
 - **`fused_points.csv`**: only written when the exported points are at most `--csv-max-points`.
 - **`per_camera_stats.csv`**, per camera:
   - point counts: candidates, in_front, in_image, occluded, valid_views;
@@ -161,6 +162,7 @@ Thresholds (`--thresholds 0.5` or `crack=0.6,spalling=0.7,...`) and `--min-views
 - **`summary.json`**: synthetic flag, frame decision, occlusion tolerance, state and label counts, legend, warnings.
 
 `--export-scope all|observed|damage` controls which points are written.
+`--normals` is an export option: changing it with `--resume` on a finished run only rewrites the outputs (no re-accumulation).
 
 Run-level files:
 - `manifest.json` (fingerprint);
@@ -196,7 +198,7 @@ Run-level files:
 - **Chunk culling.** A first pass computes one bounding sphere per chunk. A chunk is skipped for a camera when its sphere lies outside the camera's field-of-view cone (a conservative test). The benefit depends on how spatially coherent the file order of the PLY is. The log reports "N chunks updated" for each batch.
 - **Disk estimate for the full cloud** (about 13.76 GB, 25 B per point, so about 550M points):
   - accumulators: about 27.5 GB;
-  - `fused_points.ply` with `--export-scope all`: about 33 GB;
+  - `fused_points.ply` with `--export-scope all`: about 30 GB without normals, about 36 GB with them (54 / 66 B per point);
   - shards: similar size;
   - prefer `--export-scope observed` or `damage`. `--dry-run` prints the estimates.
 - **Measured in the development sandbox** (2 CPU cores, Linux, synthetic 30M-point PLY, 0.75 GB, 5 cameras, chunk 2M, batch 2): peak RSS 1.84 GB and 131 s wall time, export included.

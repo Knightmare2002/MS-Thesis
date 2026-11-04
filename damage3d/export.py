@@ -1,13 +1,19 @@
 """Outputs: CloudCompare-friendly PLY, machine-readable shards/CSV, summary.
 
 ``outputs/fused_points.ply`` (binary little endian), one vertex per exported point:
-    x, y, z (float32, SAME frame and values as the source PLY), red, green, blue,
+    x, y, z (float32, SAME frame and values as the source PLY),
+    nx, ny, nz (float32, copied unchanged from the source PLY; only when normals are exported),
+    red, green, blue,
     state, label_mask, n_classes, n_views, score_<class> x6 (NaN = no valid view),
     views_<class> x6, source_index.
 CloudCompare loads red/green/blue as colors and every other property as a
 scalar field (filter e.g. ``score_crack`` or ``label_mask``).
 
-``outputs/fused/chunk_XXXXXX.npz``: source_index, xyz, score (n,6), views (n,6),
+Without nx/ny/nz, viewers such as Metashape or CloudCompare estimate normals with
+arbitrary orientation, which yields inconsistent (inverted) shading; exporting the
+source normals avoids that.
+
+``outputs/fused/chunk_XXXXXX.npz``: source_index, xyz, [normal], score (n,6), views (n,6),
 votes (n,6), n_views, label_mask, state (+ ``outputs/classes.json``).
 ``outputs/fused_points.csv`` only when the exported points <= --csv-max-points.
 """
@@ -23,12 +29,15 @@ import numpy as np
 
 from .classes import CLASS_COLORS, DAMAGE_CLASSES, NUM_CLASSES, STATE_COLORS, STATE_NAMES, class_bit
 from .fusion import CAMERA_STAT_FIELDS, ChunkAccumulator, fuse
-from .ply_io import PlyStreamWriter
+from .ply_io import NORMAL_FIELDS, PlyStreamWriter
 from .run_state import write_json_atomic
 
 
-def ply_dtype(index_dtype: str) -> np.dtype:
-    fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1"),
+def ply_dtype(index_dtype: str, normals: bool = False) -> np.dtype:
+    fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")]
+    if normals:
+        fields += [(n, "<f4") for n in NORMAL_FIELDS]
+    fields += [("red", "u1"), ("green", "u1"), ("blue", "u1"),
               ("state", "u1"), ("label_mask", "u1"), ("n_classes", "u1"), ("n_views", "<u2")]
     fields += [(f"score_{c}", "<f4") for c in DAMAGE_CLASSES]
     fields += [(f"views_{c}", "<u2") for c in DAMAGE_CLASSES]
@@ -56,8 +65,12 @@ def legend() -> dict:
 
 
 def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.ndarray, min_views: int,
-               scope: str, csv_max_points: int, n_cameras: int, camera_rows: list[dict], meta: dict) -> dict:
-    """Stream every chunk twice (count, then write) without holding the cloud in RAM."""
+               scope: str, csv_max_points: int, n_cameras: int, camera_rows: list[dict], meta: dict,
+               normals: bool = False) -> dict:
+    """Stream every chunk twice (count, then write) without holding the cloud in RAM.
+
+    ``normals``: copy nx, ny, nz of the source PLY into the output (requires them in the source).
+    """
     out = run.out_dir
     shard_dir = out / "fused"
     shard_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +78,7 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
         old.unlink()
 
     index_dtype = "<u4" if selection.n_source <= np.iinfo(np.uint32).max else "<f8"
-    dtype = ply_dtype(index_dtype)
+    dtype = ply_dtype(index_dtype, normals)
     state_counts = np.zeros(4, dtype=np.int64)
     label_counts = np.zeros(NUM_CLASSES, dtype=np.int64)
     multi_label_points = 0
@@ -90,12 +103,14 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
         if not keep.any():
             continue
         src_idx = selection.source_index_array(int(start), int(stop))[keep]
-        xyz = ply_source.xyz(selection.source_index(int(start), int(stop)))[keep].astype(np.float32)
+        src_sel = selection.source_index(int(start), int(stop))
+        xyz = ply_source.xyz(src_sel)[keep].astype(np.float32)
+        extra = {"normal": ply_source.normals(src_sel)[keep]} if normals else {}
         tmp = shard_dir / f"chunk_{j:06d}.npz.tmp"
         with tmp.open("wb") as f:
             np.savez(f, source_index=src_idx, xyz=xyz, score=fused.score[keep], views=acc.count[keep],
                      votes=acc.votes[keep], n_views=acc.n_views[keep], label_mask=fused.label_mask[keep],
-                     state=fused.state[keep], rgb=fused.rgb[keep])
+                     state=fused.state[keep], rgb=fused.rgb[keep], **extra)
         os.replace(tmp, shard_dir / f"chunk_{j:06d}.npz")
 
     # Pass 2: stream the PLY (and optional CSV) from the shards.
@@ -117,6 +132,9 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
             d = {k: z[k] for k in z.files}
         rec = np.zeros(len(d["state"]), dtype=dtype)
         rec["x"], rec["y"], rec["z"] = d["xyz"][:, 0], d["xyz"][:, 1], d["xyz"][:, 2]
+        if normals:
+            for i, n in enumerate(NORMAL_FIELDS):
+                rec[n] = d["normal"][:, i]
         rec["red"], rec["green"], rec["blue"] = d["rgb"][:, 0], d["rgb"][:, 1], d["rgb"][:, 2]
         rec["state"] = d["state"]
         rec["label_mask"] = d["label_mask"]
@@ -158,6 +176,7 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
         "export_scope": scope,
         "thresholds": dict(zip(DAMAGE_CLASSES, thresholds.tolist())),
         "min_views": min_views,
+        "normals": "source" if normals else "none",
         "state_counts": {STATE_NAMES[k]: int(state_counts[k]) for k in range(4)},
         "label_counts": dict(zip(DAMAGE_CLASSES, label_counts.tolist())),
         "points_with_two_or_more_labels": multi_label_points,

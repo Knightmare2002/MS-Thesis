@@ -102,6 +102,9 @@ def read_ply_header(path: Path) -> PlyHeader:
     )
 
 
+NORMAL_FIELDS = ("nx", "ny", "nz")
+
+
 class PlyPointSource:
     """Read-only random/sequential access to the vertex records of a PLY."""
 
@@ -128,6 +131,18 @@ class PlyPointSource:
         """float64 (n,3) coordinates for a slice or a sorted index array."""
         rec = self._mm[index]
         return np.column_stack((rec["x"], rec["y"], rec["z"])).astype(np.float64)
+
+    @property
+    def has_normals(self) -> bool:
+        """True when the vertex element declares nx, ny, nz."""
+        return all(n in self.header.dtype.names for n in NORMAL_FIELDS)
+
+    def normals(self, index) -> np.ndarray:
+        """float32 (n,3) source normals, copied unchanged, for a slice or a sorted index array."""
+        if not self.has_normals:
+            raise RuntimeError(f"{self.path} has no nx/ny/nz vertex properties.")
+        rec = self._mm[index]
+        return np.column_stack([rec[n] for n in NORMAL_FIELDS]).astype(np.float32)
 
     def close(self) -> None:
         mm = getattr(self, "_mm", None)
