@@ -163,3 +163,57 @@ def test_point_sampling_is_reproducible():
     s = make_selection(10, 4, "stride", 0)
     assert s.indices.tolist() == [0, 2, 5, 7]
     assert make_selection(10, None).indices is None
+
+
+def test_source_normals_are_copied_and_can_be_disabled(project_tf, tmp_path):
+    out = tmp_path / "normals"
+    summary = _run(project_tf, out, "--camera", "DSC01020", "--max-points", "3000")
+    assert summary["normals"] == "source"
+    ply = PlyPointSource(out / "outputs" / "fused_points.ply")
+    names = [n for n, _ in ply.header.properties]
+    assert names[:6] == ["x", "y", "z", "nx", "ny", "nz"]
+    src = PlyPointSource(project_tf["root"] / "bridge_3dpc_point_cloud.ply")
+    idx = np.asarray(ply._mm["source_index"]).astype(np.int64)      # sorted, as in the shards
+    np.testing.assert_array_equal(ply.normals(slice(None)), src.normals(idx))
+    ply.close()
+    src.close()
+    import open3d as o3d
+    assert o3d.io.read_point_cloud(str(out / "outputs" / "fused_points.ply")).has_normals()
+
+    out2 = tmp_path / "no_normals"
+    summary = _run(project_tf, out2, "--camera", "DSC01020", "--max-points", "3000", "--normals", "none")
+    assert summary["normals"] == "none"
+    ply = PlyPointSource(out2 / "outputs" / "fused_points.ply")
+    assert not ply.has_normals
+    ply.close()
+
+
+def test_normals_toggle_on_resume_only_reexports(project_tf, tmp_path):
+    out = tmp_path / "resume_normals"
+    _run(project_tf, out, "--camera", "DSC01020", "--max-points", "3000", "--normals", "none")
+    before = _load_shards(out)
+    summary = _run(project_tf, out, "--camera", "DSC01020", "--max-points", "3000", "--resume")
+    after = _load_shards(out)
+    assert summary["normals"] == "source" and "normal" in after
+    np.testing.assert_array_equal(before["score"], after["score"])
+    np.testing.assert_array_equal(before["state"], after["state"])
+
+
+def test_add_normals_to_existing_export_matches_direct_export(project_tf, tmp_path):
+    from damage3d.add_normals import main as add_normals_main
+    src_ply = project_tf["root"] / "bridge_3dpc_point_cloud.ply"
+    direct, legacy = tmp_path / "direct", tmp_path / "legacy"
+    _run(project_tf, direct, "--camera", "DSC01020", "--max-points", "3000")
+    _run(project_tf, legacy, "--camera", "DSC01020", "--max-points", "3000", "--normals", "none")
+    fused = legacy / "outputs" / "fused_points.ply"
+    before = fused.read_bytes()
+    assert add_normals_main(["--fused", str(fused), "--source", str(src_ply), "--chunk", "700"]) == 0
+    assert fused.read_bytes() == before                                   # input untouched
+    a = PlyPointSource(direct / "outputs" / "fused_points.ply")
+    b = PlyPointSource(legacy / "outputs" / "fused_points_normals.ply")
+    assert a.header.dtype == b.header.dtype
+    assert np.asarray(a._mm).tobytes() == np.asarray(b._mm).tobytes()
+    a.close()
+    b.close()
+    with pytest.raises(RuntimeError):
+        add_normals_main(["--fused", str(fused), "--source", str(src_ply), "--out", str(fused)])

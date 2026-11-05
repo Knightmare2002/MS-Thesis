@@ -80,7 +80,10 @@ def write_ply(path: Path, xyz: np.ndarray, cls: np.ndarray) -> None:
                       ("nz", "<f4"), ("class", "u1")])
     rec = np.zeros(len(xyz), dtype=dtype)
     rec["x"], rec["y"], rec["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    rec["nz"] = 1.0
+    # Distinct unit normals per point so that copying them can be checked index by index.
+    n = np.random.default_rng(7).normal(size=(len(xyz), 3))
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    rec["nx"], rec["ny"], rec["nz"] = n[:, 0], n[:, 1], n[:, 2]
     rec["class"] = cls
     header = ("ply\nformat binary_little_endian 1.0\ncomment synthetic test cloud\n"
               f"element vertex {len(xyz)}\nproperty float x\nproperty float y\nproperty float z\n"

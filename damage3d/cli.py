@@ -74,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "frozen thresholds of --calibration/--ensemble, else 0.5. Synthetic runs: TEST thresholds")
     g.add_argument("--min-views", type=int, default=1)
     g.add_argument("--export-scope", choices=("all", "observed", "damage"), default="all")
+    g.add_argument("--normals", choices=("auto", "source", "none"), default="auto",
+                   help="copy nx/ny/nz of the source PLY into fused_points.ply (auto: when present)")
     g.add_argument("--csv-max-points", type=int, default=200_000)
 
     g = p.add_argument_group("control")
@@ -136,6 +138,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         thresholds=args.thresholds,
         min_views=args.min_views,
         export_scope=args.export_scope,
+        normals=args.normals,
         csv_max_points=args.csv_max_points,
         dry_run=args.dry_run,
         resume=args.resume,
