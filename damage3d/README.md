@@ -257,6 +257,25 @@ Coverage:
   - the file provider.
 - **Real data:** `test_real_dsc02150.py` reproduces `verify_marker_projection.py` on the real XML with the vectorised projector. It is skipped when the data are not reachable.
 
+## 10b. ROI coverage, GSD and Labelme pre-fill (`roi_views`)
+
+`python -m damage3d.roi_views` reuses `CameraProjector` and `MeshOcclusion` to describe, per camera, how the 3D ROI is seen, and writes the projected ROI as Labelme polygons.
+
+Input: the ROI segmented in CloudCompare from the dense cloud, saved as **binary little-endian PLY in the dense-cloud frame** (no global shift). Normals are optional; if absent they are estimated by PCA (SciPy).
+
+```powershell
+python -m damage3d.roi_views --project-root "C:\Users\Samuele_Caruso\Desktop\bridge_model" `
+  --roi roi_points.ply --out roi_views --labelme-dir labelme_json --images-dir images `
+  --sample-per-stratum 12
+```
+
+Outputs in `--out`:
+- `roi_views.csv`: per camera `n_in_image`, `n_visible`, `image_coverage` (visible ROI footprint / image area), `gsd_frontal_*` (\(Z/f\), source units per pixel), `gsd_eff_*` (\(Z/(f\,|\cos\theta|)\)), `gsd_eff_map_median` (× `--map-downsample`), incidence, eligibility, GSD stratum (near/mid/far terciles), sampled flag;
+- `summary.json`: frame decision, occlusion tolerance, ROI-to-mesh deviation, quantiles of coverage across cameras, tercile edges;
+- `test_views_sample.txt`: seeded stratified sample of eligible cameras.
+
+Labelme: the visible footprint becomes `roi` polygons, occluded holes inside it become `ignore` polygons (`description: auto:roi_views`). Existing JSON files are never overwritten; `--replace-roi` replaces only the auto ROI/ignore shapes and keeps every damage annotation. Units are those of the source cloud until the metric scale is fixed (`--mm-per-unit` adds mm columns). Choose `--min-image-coverage` / `--min-visible-points` from `summary.json` quantiles before looking at the images.
+
 ## 11. PowerShell commands
 
 ```powershell

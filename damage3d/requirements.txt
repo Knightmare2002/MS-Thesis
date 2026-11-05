@@ -2,4 +2,6 @@
 numpy>=1.24
 open3d>=0.17      # mesh ray casting (RaycastingScene); check that a wheel exists for your Python version
 Pillow>=10.0      # synthetic PNG mask provider and photo size/EXIF check
+scipy>=1.10       # roi_views: k-NN spacing and PCA normals
+opencv-python-headless>=4.9  # roi_views: footprint contours
 pytest>=7.0       # tests
