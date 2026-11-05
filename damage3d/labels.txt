@@ -1,0 +1,6 @@
+crack
+spalling
+corrosion
+moisture
+surface
+ignore
