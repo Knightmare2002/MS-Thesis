@@ -1,5 +1,6 @@
 # damage3d - geometric 3D damage-mapping pipeline (no deep-learning dependency)
 numpy>=1.24
+scipy>=1.10      # Direction A constrained fitting, spatial split checks and medial-axis distances
 open3d>=0.17      # mesh ray casting (RaycastingScene); check that a wheel exists for your Python version
 Pillow>=10.0      # synthetic PNG mask provider and photo size/EXIF check
 pytest>=7.0       # tests

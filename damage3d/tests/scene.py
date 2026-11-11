@@ -75,14 +75,17 @@ def points_chunk(n_deck: int = 16000, n_top: int = 4000, seed: int = 1):
     return np.vstack((deck, top)), cls
 
 
-def write_ply(path: Path, xyz: np.ndarray, cls: np.ndarray) -> None:
+def write_ply(path: Path, xyz: np.ndarray, cls: np.ndarray, normals: np.ndarray | None = None) -> None:
     dtype = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("nx", "<f4"), ("ny", "<f4"),
                       ("nz", "<f4"), ("class", "u1")])
     rec = np.zeros(len(xyz), dtype=dtype)
     rec["x"], rec["y"], rec["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     # Distinct unit normals per point so that copying them can be checked index by index.
-    n = np.random.default_rng(7).normal(size=(len(xyz), 3))
-    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    if normals is None:
+        n = np.random.default_rng(7).normal(size=(len(xyz), 3))
+        n /= np.linalg.norm(n, axis=1, keepdims=True)
+    else:
+        n = normals
     rec["nx"], rec["ny"], rec["nz"] = n[:, 0], n[:, 1], n[:, 2]
     rec["class"] = cls
     header = ("ply\nformat binary_little_endian 1.0\ncomment synthetic test cloud\n"
@@ -140,7 +143,9 @@ def write_xml(path: Path, chunk_transform: bool, extra_coefficients: dict | None
     Path(path).write_text(xml, encoding="utf-8")
 
 
-def build_project(root: Path, chunk_transform: bool = True, n_deck: int = 16000, n_top: int = 4000) -> dict:
+def build_project(root: Path, chunk_transform: bool = True, n_deck: int = 16000, n_top: int = 4000,
+                  true_normals: bool = False) -> dict:
+    """``true_normals``: surface normals (+z in the chunk frame) instead of distinct random ones."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     m, _ = chunk_matrix()
@@ -148,7 +153,11 @@ def build_project(root: Path, chunk_transform: bool = True, n_deck: int = 16000,
     xyz_c, cls = points_chunk(n_deck, n_top)
     xyz_s = xyz_c @ to_source[:3, :3].T + to_source[:3, 3]
     v, f = mesh_chunk()
-    write_ply(root / "bridge_3dpc_point_cloud.ply", xyz_s, cls)
+    normals = None
+    if true_normals:
+        normals = np.tile(to_source[:3, :3] @ np.array([0.0, 0.0, 1.0]), (len(xyz_s), 1))
+        normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    write_ply(root / "bridge_3dpc_point_cloud.ply", xyz_s, cls, normals)
     write_obj(root / "model_medium_quality.obj", v @ to_source[:3, :3].T + to_source[:3, 3], f)
     write_xml(root / "cameras.xml", chunk_transform)
     # Marker reference in the verified format (chunk coordinates + Metashape pixel).

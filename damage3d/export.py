@@ -14,7 +14,9 @@ arbitrary orientation, which yields inconsistent (inverted) shading; exporting t
 source normals avoids that.
 
 ``outputs/fused/chunk_XXXXXX.npz``: source_index, xyz, [normal], score (n,6), views (n,6),
-votes (n,6), n_views, label_mask, state (+ ``outputs/classes.json``).
+votes (n,6), n_views, label_mask, state (+ ``outputs/classes.json``); with ``--fusion llr`` or
+``censored_llr`` also score_mean (mean probability) and llr (summed evidence). ``score`` is the
+fused score of the selected rule (mean probability or llr posterior), in the PLY too.
 ``outputs/fused_points.csv`` only when the exported points <= --csv-max-points.
 """
 
@@ -66,7 +68,7 @@ def legend() -> dict:
 
 def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.ndarray, min_views: int,
                scope: str, csv_max_points: int, n_cameras: int, camera_rows: list[dict], meta: dict,
-               normals: bool = False) -> dict:
+               normals: bool = False, fusion_model=None) -> dict:
     """Stream every chunk twice (count, then write) without holding the cloud in RAM.
 
     ``normals``: copy nx, ny, nz of the source PLY into the output (requires them in the source).
@@ -93,7 +95,7 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
     for j, (start, stop) in enumerate(chunks):
         n = int(stop - start)
         acc = load(j, n)
-        fused = fuse(acc, thresholds, min_views)
+        fused = fuse(acc, thresholds, min_views, fusion_model)
         camera_stats += acc.camera_stats
         state_counts += np.bincount(fused.state, minlength=4)[:4]
         label_counts += fused.labels.sum(axis=0)
@@ -106,6 +108,8 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
         src_sel = selection.source_index(int(start), int(stop))
         xyz = ply_source.xyz(src_sel)[keep].astype(np.float32)
         extra = {"normal": ply_source.normals(src_sel)[keep]} if normals else {}
+        if fused.score_mean is not None:
+            extra.update(score_mean=fused.score_mean[keep], llr=acc.llr[keep])
         tmp = shard_dir / f"chunk_{j:06d}.npz.tmp"
         with tmp.open("wb") as f:
             np.savez(f, source_index=src_idx, xyz=xyz, score=fused.score[keep], views=acc.count[keep],
@@ -174,6 +178,7 @@ def export_run(run, chunks: np.ndarray, selection, ply_source, thresholds: np.nd
         "n_points_selected": int(selection.size),
         "n_points_exported": n_export,
         "export_scope": scope,
+        "fusion": fusion_model.describe() if fusion_model is not None else {"mode": "mean"},
         "thresholds": dict(zip(DAMAGE_CLASSES, thresholds.tolist())),
         "min_views": min_views,
         "normals": "source" if normals else "none",

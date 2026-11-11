@@ -145,6 +145,348 @@ Thresholds (`--thresholds 0.5` or `crack=0.6,spalling=0.7,...`) and `--min-views
 - **Synthetic runs:** 0.5 is a declared **test** threshold.
 - **Real runs:** use thresholds selected on DACL10K validation for the chosen model. Never calibrate them on the external bridge.
 
+## Direction A: resolution-conditioned observation likelihood
+
+This experimental extension is based on commit `186819950939369ad0d83321ee1a389d46781bb8`.
+It implements the primary Direction A model, its estimation workflow, controlled
+baselines and evaluation, not a verified bridge-performance or publication claim.
+Read `DIRECTION_A_METHOD.md` for the derivation, prior-art audit and assumptions.
+The mean path remains the default; the extension does not retrain the detector.
+
+### Observation model and changes to the earlier proposal
+
+For each of the five active classes:
+\[
+\lambda_{ivc}=\operatorname{logit}p_{ivc}-\operatorname{logit}\rho_c,\quad
+\pi_c(g)=\operatorname{sigmoid}((\log g_c^{50}-\log g)/\beta_c),
+\]
+\[
+\widetilde\lambda_{ivc}=\log(1-\pi_c+\pi_c e^{\lambda_{ivc}}),\quad
+s_{ic}=\operatorname{sigmoid}\{\operatorname{logit}b_c^{prior}
++\alpha_c\sum_v\widetilde\lambda_{ivc}\}.
+\]
+The implementation uses `logaddexp` for numerical stability. `rho` is the measured
+prevalence in the detector's Platt-calibration set; optional `base_rate` is the target
+prior and defaults to `rho`. Do not infer either from T. `--fusion llr` omits the
+mixture; `--fusion censored_llr` uses it. Missing/invalid per-class curves are errors,
+not implicit defaults. Legacy `kappa` is rejected: the report uses log-GSD width
+`beta`, not its reciprocal.
+
+- **Evidence interpretation:** a negative contribution means `p < rho`, not
+  necessarily `p < detection_threshold`. Both evidence signs approach zero as
+  `pi -> 0`; the method does not unconditionally preserve every positive.
+- **Identification:** measured recall is `q(g) = background_fpr +
+  (resolved_tpr-background_fpr)*pi(g)`, not `pi(g)`. Two externally fixed anchors
+  are required; four unanchored curve parameters are never fitted together.
+- **Calibration:** a calibrated ensemble average is not guaranteed calibrated.
+  Real likelihood runs require a single `files+platt` provider, matching calibration
+  hash and prevalence. Mean/ensemble legacy inference is unaffected.
+- **Geometry:** `g = (Z*s/f) * map_scale / sqrt(max(abs_cos,min_cos))`.
+  The default floor is `min_cos=0.0872`, approximately cos(85 degrees). `map_scale`
+  is measured `W/Wm`, multiplied by `--inference-scale` only for an additional
+  inference resize not already counted. Native sliding-window inference needs 1.
+  This scalar pinhole approximation is not an exact distortion Jacobian or crack width.
+- **Tempering:** class-specific alpha in `(0,1]` regularizes evidence on C_cal;
+  it is not a pairwise camera-correlation estimator. The uncensored and
+  pi-weighted-LLR comparators receive their own fitted alpha, on the same labels.
+- **Uncertainty:** the likelihood is a working model. Pooled DACL10K calibration
+  may not represent fully resolved positives, and transfer/background-shift
+  assumptions require experimental checks. Do not call its output a certified POD.
+- **Optional terms:** primary `omega=1`; no invented quality weight or anisotropic
+  crack-direction correction. `min_views` remains an export/coverage policy, not
+  the new observation model.
+
+### Added and modified implementation
+
+The following file inventory is the change log. Existing geometry, occlusion and
+sampling algorithms are reused, not replaced.
+
+- **`detectability.py`, `fusion_params.py`:** validated class parameters, calibrated
+  prior extraction, stable mixture/posterior, explicit units and immutable JSON output.
+- **`observations.py`:** atomic schema-3 point-view logs, original PLY row IDs,
+  camera IDs, projected pixels, camera depth, Euclidean source-frame range,
+  frontal GSD, unsigned incidence, effective map scale and five sampled probabilities.
+  Each record is 54 bytes. NaN channel means invalid, not no damage.
+- **`pipeline.py`, `cli.py`:** `--fusion`, `--fusion-params`, `--inference-scale`,
+  `--observation-log`, `--observation-subset`; source-frame incidence and range;
+  strict calibration/normal checks; versioned resume fingerprints. Logging happens
+  before accumulator commit, so replay overwrites a shard rather than duplicating it.
+- **`fusion.py`, `export.py`:** optional evidence accumulator and posterior export;
+  likelihood shards also retain `score_mean` and `llr`. Main PLY schema is preserved.
+  Default likelihood decision threshold is 0.5, not a transferred detector threshold.
+- **`experiment_data.py`:** sorted unique original IDs, class order, unknown labels,
+  positive surface areas, region-level splits and spatial buffer validation;
+  completed-batch checks, a sealed shard inventory and SHA-256 binding of every observation shard,
+  regions, config, parameters and downstream scores. Files are not overwritten.
+- **`resolvability_fit.py`:** leave-view/group-out pseudo-positive fitting on C_fit,
+  equal region/point mass, anchored Bernoulli MLE, multistart bounded optimization,
+  identifiability checks, empirical bins and optional region-bootstrap intervals.
+- **`tempering_fit.py`, `freeze_direction_a.py`:** C_cal-only NLL minimization;
+  independent comparator tempering; per-method/class F1 thresholds on a declared
+  0.01:0.01:0.99 grid, highest-threshold tie break, no tuning on T.
+- **`fusion_benchmark.py`:** same-observation offline comparisons, nested global
+  camera subsets, optional label-assisted per-point/class view oracle. This is
+  explicitly not the best single physical camera for an entire region.
+- **`experiment_metrics.py`, `evaluate_direction_a.py`:** area-weighted AP/F1/IoU,
+  NLL/Brier, coverage, common-support comparisons, paired region-bootstrap delta
+  intervals, frozen GSD/incidence bins and descriptive area-weighted bin slopes.
+- **`crack_axis_metrics.py`:** tolerance IoU for supplied, uniformly sampled 3D
+  medial axes. No automatic skeletonization or crack-width estimate.
+- **`scripts/29_direction_a_degradation.py`, `prepare_direction_a.py`:** frozen-model
+  RGB downsampling/re-inference on DACL10K, native-grid evaluation, per-image counts
+  and optional native-scale anchor configuration. Merely resizing predictions
+  is not the degradation experiment.
+- **`synthetic_direction_a.py`:** known-generative and deliberately misspecified
+  simulations. These are not semi-synthetic image experiments.
+- **`roi_views.py`:** includes the previously proposed ROI coverage/GSD/Labelme
+  helper absent from this main branch. It prepares views and annotation inputs,
+  not independent GT. It is optional for Direction A fitting.
+- **`requirements.txt`, tests:** SciPy >=1.10 for optimization/KD-trees; analytical,
+  geometry/logging/resume, fitting/metric, leakage and end-to-end experiment tests.
+  `tests/scene.py` adds known surface normals to the synthetic Metashape fixture.
+
+### Required data contract and frozen design
+
+Prepare `regions.npz` with `allow_pickle=False` compatible arrays. The external
+annotations must be independent of model output, cover negative surfaces and
+confounders, and retain unassessed areas as unknown. Metashape is the intended
+3D review/annotation environment.
+
+```text
+source_index : (N,) unique nonnegative integer ORIGINAL PLY row IDs
+region       : (N,) integer or fixed-width string independent region/block IDs
+split        : (N,) strings "C_fit", "C_cal", "T"; each region belongs to one split
+xyz          : (N,3) finite source-PLY coordinates, same units as --buffer
+area         : (N,) positive physical surface-support weights
+labels       : (N,5) -1 unknown, 0 assessed absent, 1 assessed present
+classes      : (5,) ["crack","spalling","corrosion","moisture","surface"]
+```
+
+Do not use row numbers from a filtered/reordered export as `source_index`. Verify
+coordinates against those original rows. Area weights must come from surface
+support (for example fixed-area sampling or mesh-associated areas); setting all
+weights to 1 is only defensible for independently verified uniform-area sampling.
+The buffer checks supplied point coordinates, not continuous polygon boundaries;
+ensure full ROI boundaries and neighbourhood/context sizes are separated too.
+Region IDs must encode the independent experimental unit, not arbitrary
+subdivisions of one correlated patch.
+
+C_fit can have all labels -1. Its fit needs three supported regions per class by
+default, hits and misses, at least 50 eligible observations and a >=2x GSD span.
+C_cal needs both labels and three supported regions per class by default. These
+are software guardrails, not sample-size/power guarantees. If one class fails,
+the all-class fit stops: collect more information or explicitly redesign the
+class-specific experiment, rather than inventing a `g50`.
+
+From a reviewed CSV with columns `source_index,region,split,x,y,z,area` and the
+five class labels, this one-time conversion preserves the contract:
+
+```python
+import numpy as np
+from damage3d.classes import DAMAGE_CLASSES
+d = np.genfromtxt("regions_reviewed.csv", delimiter=",", names=True, dtype=None, encoding="utf8")
+d = np.atleast_1d(d)
+np.savez_compressed("regions.npz", source_index=d["source_index"], region=d["region"],
+    split=d["split"], xyz=np.column_stack([d[k] for k in ("x","y","z")]), area=d["area"],
+    labels=np.column_stack([d[c] for c in DAMAGE_CLASSES]), classes=np.array(DAMAGE_CLASSES))
+np.save("roi_source_ids.npy", d["source_index"])
+```
+
+The code cannot certify annotation independence or surface-area correctness.
+Freeze region membership, buffers, camera groups, pseudo-reference choices,
+threshold policy, bins and camera-subset seeds before examining T outcomes.
+
+### Executable workflow
+
+Run from the repository root. Set these absolute paths to your actual files;
+the example buffer of 0.5 is valid only if you deliberately choose half a source
+unit and justify it against geometry and spatial correlation. Helpers resolve
+paths from the current directory; the main mapper resolves relative paths from
+`--project-root`, so absolute paths avoid ambiguity.
+
+```powershell
+$Repo = (Get-Location).Path
+$P = "C:\Users\Samuele_Caruso\Desktop\bridge_model"
+$Run2D = Join-Path $Repo "outputs\runs\p1ml_t12_upernet_convnext_base_512_ade20k"
+$Cal = Join-Path $Run2D "eval_curves\probability_calibration.json"
+$Maps = Join-Path $P "damage3d_maps\p1ml_t12_upernet_convnext_base_512_ade20k"
+$E = Join-Path $P "direction_a_experiment_01"
+$Obs = Join-Path $E "observations_run"
+$Regions = Join-Path $E "regions.npz"
+$Subset = Join-Path $E "roi_source_ids.npy"
+$B = 0.5
+New-Item -ItemType Directory -Force $E | Out-Null
+python -m pip install -r damage3d\requirements.txt
+python -m pytest damage3d\tests -q
+```
+
+Place the reviewed ROI files in `$E`. Ensure `$Maps` holds raw probabilities
+from `scripts/23_infer_probability_maps.py`, from the checkpoint referenced by
+`$Cal`: the mapper applies Platt once. Do not supply already calibrated maps.
+Supply the same explicit `--camera-list` to inference and projection if restricting
+views; omitting selectors below means all aligned/enabled cameras need maps.
+
+```powershell
+# Project once and retain all valid observations for the ROI subset.
+# No fitted curves or ROI labels are needed at this stage.
+python -m damage3d --project-root $P --probability-source files `
+  --probabilities-dir $Maps --calibration $Cal --fusion mean `
+  --observation-log --observation-subset $Subset --inference-scale 1 `
+  --output-dir $Obs --point-chunk-size 200000 --camera-batch-size 4
+
+# Base priors are measured from the stored Platt-calibration diagnostics.
+python -m damage3d.fusion_params --calibration $Cal --out "$E\base_params.json"
+
+# Requires the existing training/inference environment, weights and dataset.
+# First use --limit 2 with a separate output as a local GPU smoke test.
+python scripts\29_direction_a_degradation.py --run-dir $Run2D `
+  --data-root "$Repo\datasets\dacl10k" --split validation `
+  --scales 1 2 3 4 5 6 7 8 --out "$E\degradation.json"
+python -m damage3d.prepare_direction_a --degradation "$E\degradation.json" `
+  --out "$E\fit_config.json"
+
+# Review/freeze fit_config.json BEFORE fitting.
+python -m damage3d.resolvability_fit --run $Obs --regions $Regions --buffer $B `
+  --params "$E\base_params.json" --config "$E\fit_config.json" `
+  --bootstrap 200 --seed 0 --out "$E\resolvability_params.json"
+
+# All methods use the same visibility log; no re-projection.
+python -m damage3d.fusion_benchmark --run $Obs --regions $Regions --buffer $B `
+  --params "$E\resolvability_params.json" --out "$E\scores_untempered.npz"
+python -m damage3d.tempering_fit --scores "$E\scores_untempered.npz" `
+  --regions $Regions --buffer $B --params "$E\resolvability_params.json" `
+  --out "$E\final_params.json"
+python -m damage3d.fusion_benchmark --run $Obs --regions $Regions --buffer $B `
+  --params "$E\final_params.json" --out "$E\scores_full.npz"
+python -m damage3d.freeze_direction_a --scores "$E\scores_full.npz" `
+  --regions $Regions --buffer $B --out "$E\thresholds.json"
+```
+
+`fit_config.json` contains measured `resolved_tpr`, `background_fpr`, threshold
+and anchor-source provenance for every class. Native-scale DACL10K recall is only
+a reference anchor, not proof of a fully resolved observation. The preparer uses
+declared defaults `top_k=2`, `min_resolution_ratio=1.25`,
+`reference_threshold=max(0.9,detector_threshold)`. They trade reference precision
+against support; they are design choices, not measured optima. Perform sensitivity
+analysis on C only. Optional `common.camera_groups` maps string camera IDs
+from `observations/meta.json` to group names; unlisted cameras are individual groups.
+Use groups for overlapping/nearly duplicate frames. The candidate's group is
+excluded, then the k finest eligible distinct groups must unanimously be positive.
+
+Prepare `bins.json` with finite strictly increasing `g_edges` in source-units/map-pixel
+and `incidence_edges` in degrees, chosen from C/geometry before viewing T metrics.
+For example, an explicitly justified metric-scale experiment might use
+`{"g_edges":[0,0.001,0.002,0.004,0.008,0.02,1],"incidence_edges":[0,30,60,75,90]}`;
+these numbers are illustrative, not measured Lincoln Street bounds.
+
+```powershell
+python -m damage3d.evaluate_direction_a --scores "$E\scores_full.npz" `
+  --regions $Regions --buffer $B --thresholds "$E\thresholds.json" `
+  --bins "$E\bins.json" --bootstrap 1000 --seed 0 --out "$E\metrics_full.json"
+
+# Nested global camera subsets, same seeds across fractions. Never refit on T.
+foreach ($Seed in 0,1,2,3,4) {
+  foreach ($Fraction in 0.25,0.5,1.0) {
+    $Tag = "f${Fraction}_s${Seed}"
+    python -m damage3d.fusion_benchmark --run $Obs --regions $Regions --buffer $B `
+      --params "$E\final_params.json" --fraction $Fraction --seed $Seed --out "$E\scores_$Tag.npz"
+    python -m damage3d.evaluate_direction_a --scores "$E\scores_$Tag.npz" `
+      --regions $Regions --buffer $B --thresholds "$E\thresholds.json" --bins "$E\bins.json" `
+      --bootstrap 1000 --seed 0 --out "$E\metrics_$Tag.json"
+  }
+}
+```
+
+The full-view score and JSON sidecar must travel together. Each output includes
+hashes, selected cameras and parameters. Output names must be new; deliberately
+delete only disposable smoke-test outputs, not frozen experiment results.
+Resolvability bootstrap intervals condition on fixed anchors and pseudo-positive
+selection; they do not include uncertainty in transferred detector rates.
+
+### Baselines, diagnostics and interpretation
+
+The offline `METHODS` are `mean`, `max`, `angle_range`, `distance_range`,
+`distance_weighted`, `naive_bayes`, `tempered_bayes`, `censored_untempered`,
+`censored`, `pi_weighted_mean`, `pi_weighted_llr`. `angle_range` keeps unsigned
+incidence <=50 degrees. Distance range uses Euclidean range below the per-point
+median; strict ties can leave no support. Distance weighting uses
+`1-(d-min)/(max-min)`; equal distances explicitly receive equal weights. These
+are documented adaptations, not a claim of exact reproduction of another codebase.
+
+Evaluation reports each method's area coverage and computes comparisons on the
+intersection of valid support for the requested methods. A restrictive geometric
+baseline may shrink that intersection: report it and predeclare a second primary
+method group with `--methods mean max naive_bayes tempered_bayes censored_untempered censored pi_weighted_mean pi_weighted_llr`.
+Never select the group after inspecting its accuracy.
+
+AP is step-integrated precision-recall with tied scores grouped. NLL clips scores
+to `[1e-7,1-1e-7]`; Brier does not. Empty sets produce JSON null, not zero. An
+all-negative set without predicted positives has undefined F1/IoU. Bootstrap draws
+whole regions, with identical draws for candidate/reference. Delta is candidate
+minus reference (`max` by default); lower NLL/Brier is better. With too few
+independent regions, intervals are not reliable even if many points exist.
+Strata use minimum GSD and median incidence per point, not each view's metric;
+their slopes are descriptive bin-midpoint regressions, not causal estimates.
+
+For a frontal-only geometry ablation, create `base_params.json` with
+`fusion_params --gsd frontal` in a separate experiment, then refit on C_fit and
+C_cal. Do not simply change `gsd` after fitting effective-GSD curves. The no-pi
+and no-tempering ablations are already included. Optional `fusion_benchmark
+--oracle` adds `oracle_best_view`, which uses labels and must only be reported
+as a diagnostic; fitting commands reject oracle score files. Evaluate it by
+including `oracle_best_view` in `--methods`; its diagnostic threshold is fixed 0.5.
+
+```powershell
+# Known-model sanity and deliberate misspecification; no images involved.
+python -m damage3d.synthetic_direction_a --seed 0 --n 10000 --views 16 --out "$E\synthetic.json"
+
+# Only after extracting/resampling GT and predicted medial axes uniformly.
+# --metres-per-unit must be independently established; 1 below assumes metres.
+python -m damage3d.crack_axis_metrics --truth "$E\gt_axes.npy" --prediction "$E\pred_axes.npy" `
+  --metres-per-unit 1 --sampling-mm 1 --tolerances-cm 0.5 1 2 4 8 --out "$E\axis_metrics.json"
+```
+
+To export the fitted method as a PLY, run the mapper into a NEW directory with
+`--fusion censored_llr --fusion-params "$E\final_params.json"` and explicit
+`--thresholds` copied from `thresholds.json["censored"]`, keeping the same geometry,
+calibration, maps and scale. The mapper does not accept a multi-method threshold
+JSON directly. Omitting thresholds gives 0.5 for a diagnostic export only.
+In Metashape, overlay source and fused PLY to review localisation; retain the
+NPZ class probabilities for quantitative multilabel evaluation.
+
+### Reproducibility, storage and remaining limitations
+
+The main accumulation is chunked. The offline fitter/benchmark filter to ROI IDs
+before concatenating observations per point chunk, but use per-point loops;
+fitting retains eligible ROI samples and benchmarking retains ROI scores.
+They are research/ROI tools, not a benchmarked 550-million-point offline engine.
+Logs cost approximately `54 * number_of_valid_point_views` bytes; prefer a
+representative, uniformly sampled ROI subset. Hashing every shard adds disk I/O.
+`--observation-subset` restricts logging, not projection or the exported cloud.
+
+The inherited mean path and log/no-log equivalence are regression-tested.
+Online float32 accumulation and offline float64 recomputation agree to a tested
+numerical tolerance, not universally bit-for-bit. Determinism assumes fixed camera
+order and software environment. Log schema 1/2 and previous development
+likelihood fingerprints are incompatible: regenerate logs; do not resume them.
+Ordinary pre-extension mean runs without logs preserve their fingerprint.
+
+Software tests include stable limits/signs, scale/normal geometry, parameter
+validation, known-curve recovery with imperfect detector anchors, held-out
+reference exclusion, tied AP, paired bootstrap, spatial buffers, provenance,
+resumed log replay, and a complete synthetic fitting-to-evaluation chain.
+Changing all synthetic T labels leaves fitted C_fit and C_cal parameters unchanged.
+The release validation record reports exact test counts and skips.
+
+Real DACL10K degradation inference, real bridge fit/performance, annotation
+reliability, cross-structure generalization, GPU runtime and full-cloud
+scalability have NOT been established by these tests. The five-class fit must
+fail if data are insufficient; software cannot create the missing scientific
+evidence. Cross-run/structure transfer is currently rejected by strict provenance:
+it requires a separately specified transfer protocol, not bypassing hash checks.
+External GT creation, area estimation and medial-axis extraction remain human/
+domain-data preparation steps, not silently approximated by model predictions.
+
 ## 6. Outputs (`<run>/outputs/`)
 
 - **`fused_points.ply`**, binary little endian. Fields:

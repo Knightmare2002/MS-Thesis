@@ -12,9 +12,11 @@ import numpy as np
 
 from .camera_model import CameraProjector
 from .classes import DAMAGE_CLASSES, NUM_CLASSES
+from .detectability import load_fusion
 from .export import export_run, ply_dtype
 from .frames import resolve_frame
 from .fusion import CAMERA_STAT_FIELDS, ChunkAccumulator, parse_thresholds
+from .observations import ObservationLog, cos_incidence, make_records
 from .metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras
 from .ply_io import PlyPointSource, make_selection
 from .providers import CalibratedProvider, EnsembleProvider, FileProvider, SyntheticProvider
@@ -68,6 +70,11 @@ class RunConfig:
     vote_threshold: float = 0.5
     thresholds: str | None = None
     min_views: int = 1
+    fusion: str = "mean"                     # mean | llr | censored_llr (damage3d/detectability.py)
+    fusion_params: Path | None = None        # JSON: class rho (+ g50, beta for censored_llr; alpha)
+    observation_log: bool = False            # write <run>/observations (damage3d/observations.py)
+    observation_subset: Path | None = None   # .npy of source indices to log (default: all points)
+    inference_scale: float = 1.0            # additional resize not already captured by W/W_m
     export_scope: str = "all"
     normals: str = "auto"  # auto | source | none
     csv_max_points: int = 200_000
@@ -105,6 +112,8 @@ def _resolve_thresholds(cfg: RunConfig) -> tuple[np.ndarray, str]:
     """Explicit --thresholds win; otherwise the frozen thresholds of the calibration/ensemble JSON; else 0.5."""
     if cfg.thresholds is not None:
         return parse_thresholds(cfg.thresholds), "--thresholds"
+    if cfg.fusion != "mean":
+        return parse_thresholds(None), "posterior 0.5 (not detector-calibrated thresholds)"
     json_path = cfg.ensemble if cfg.probability_source == "ensemble" else cfg.calibration
     if json_path is not None:
         from src.eval.probability_calibration import thresholds_from_json
@@ -300,6 +309,43 @@ def run(cfg: RunConfig) -> dict:
                                  "units": "source-frame units (PLY/OBJ)"})
         log.info("Occlusion tolerance: %.6g source units (%s)", abs_tol, tolerance_record["source"])
 
+    model = load_fusion(cfg.fusion, cfg.fusion_params)
+    if model is not None:
+        if cfg.probability_source != "synthetic":
+            if cfg.probability_source != "files" or cfg.calibration is None:
+                raise ValueError("Likelihood fusion requires a single Platt-calibrated model; "
+                                 "an ensemble of calibrated scores is not necessarily calibrated.")
+            from .fusion_params import calibration_priors
+            expected = np.array([calibration_priors(cfg.calibration)[c] for c in DAMAGE_CLASSES])
+            if not np.allclose(model.rho, expected, rtol=1e-8, atol=1e-10):
+                raise ValueError("rho differs from the provider's calibration prevalence.")
+        if cfg.thresholds is None:
+            cfg.warnings.append("Likelihood posterior uses decision threshold 0.5; detector thresholds "
+                                "are not transferred to a different score. Freeze 3D thresholds on C.")
+        if model.needs_normals and not ply.has_normals:
+            raise RuntimeError(f"--fusion censored_llr with gsd 'effective' needs nx/ny/nz in {ply.path.name} "
+                               "(or set \"gsd\": \"frontal\" in the fusion params).")
+        for name in model.uncensored_classes():
+            cfg.warnings.append(f"Fusion params: no g50/beta for '{name}': pi = 1 (plain llr) for this class.")
+        log.info("Fusion: %s (alpha %s, gsd %s)", model.mode, np.round(model.alpha, 3).tolist(), model.gsd)
+    obs_log = None
+    if cfg.observation_log:
+        subset = None
+        if cfg.observation_subset is not None:
+            subset = np.load(cfg.observation_subset)
+            if (subset.ndim != 1 or subset.dtype.kind not in "ui" or subset.size == 0 or
+                    subset.min() < 0 or subset.max() >= ply.n_points):
+                raise RuntimeError(f"{cfg.observation_subset}: expected a 1-D array of source indices "
+                                   f"in [0, {ply.n_points}).")
+        if ply.n_points > np.iinfo(np.uint32).max:
+            raise RuntimeError("Observation log stores uint32 source indices: the cloud is too large.")
+        if not ply.has_normals:
+            cfg.warnings.append("Observation log: the PLY has no normals, cos_theta is NaN.")
+    elif cfg.observation_subset is not None:
+        raise RuntimeError("--observation-subset requires --observation-log.")
+    if not np.isfinite(cfg.inference_scale) or cfg.inference_scale < 1:
+        raise ValueError("inference_scale must be finite and >= 1.")
+
     camera_rows = [{"position": pos, "label": cam.label, "camera_id": cam.camera_id, "sensor_id": cam.sensor_id}
                    for pos, cam in selected]
     inputs = {"cameras_xml": file_identity(cfg.cameras_xml, full_hash=True),
@@ -319,7 +365,15 @@ def run(cfg: RunConfig) -> dict:
         "layout": {"point_chunk_size": cfg.point_chunk_size, "camera_batch_size": cfg.camera_batch_size},
         "provider": provider.describe(),
     }
-    
+    # Added only when used, so that the fingerprints (and resume) of plain mean runs are unchanged.
+    if model is not None:
+        fingerprint["accumulation"]["fusion"] = model.describe()
+        fingerprint["accumulation"]["inference_scale"] = cfg.inference_scale
+    if cfg.observation_log:
+        fingerprint["accumulation"]["observation_log"] = {
+            "schema": 3, "inference_scale": cfg.inference_scale,
+            "subset": file_identity(cfg.observation_subset, full_hash=True) if cfg.observation_subset else "all"}
+
     run_path = cfg.output_dir
     if run_path is None:
         tag = selected[0][1].stem if len(selected) == 1 else f"{selected[0][1].stem}-{selected[-1][1].stem}_n{len(selected)}"
@@ -349,7 +403,13 @@ def run(cfg: RunConfig) -> dict:
         import os
         os.replace(tmp, rd.chunks_path)
 
-    _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, centers, radii, frame, occ, abs_tol)
+    if cfg.observation_log:
+        obs_log = ObservationLog(rd.path, subset)
+        _write_observation_meta(obs_log, selected, project, provider, frame)
+    _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, centers, radii, frame, occ, abs_tol,
+                model, obs_log)
+    if obs_log is not None:
+        obs_log.seal()
 
     thresholds, thresholds_source = _resolve_thresholds(cfg)
     log.info("Thresholds (%s): %s", thresholds_source,
@@ -362,7 +422,8 @@ def run(cfg: RunConfig) -> dict:
             "interpolation": cfg.interpolation, "n_cameras": len(selected), "run_dir": str(rd.path)}
     export_normals = _resolve_normals(cfg.normals, ply)
     summary = export_run(rd, ranges, selection, ply, thresholds, cfg.min_views, cfg.export_scope,
-                         cfg.csv_max_points, len(selected), camera_rows, meta, normals=export_normals)
+                         cfg.csv_max_points, len(selected), camera_rows, meta, normals=export_normals,
+                         fusion_model=model)
     ply.close()
     log.info("States: %s", summary["state_counts"])
     log.info("Labels: %s", summary["label_counts"])
@@ -372,7 +433,8 @@ def run(cfg: RunConfig) -> dict:
     return summary
 
 
-def _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, centers, radii, frame, occ, abs_tol):
+def _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, centers, radii, frame, occ, abs_tol,
+                model=None, obs_log=None):
     n_cams = len(selected)
     B = cfg.camera_batch_size
     n_batches = int(math.ceil(n_cams / B))
@@ -384,6 +446,8 @@ def _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, ce
         calib = project.calibration_for(cam)
         projectors.append(CameraProjector(cam.camera_to_chunk, calib, cfg.min_depth, cfg.border_margin_px))
     centers_src = [frame.to_source(pr.center_chunk[None, :])[0] for pr in projectors]
+    geo = _ViewGeometry(frame.length_to_source(1.0), model, obs_log)
+    need_normals = ply.has_normals and ((model is not None and model.needs_normals) or obs_log is not None)
     writes = 0
     for b in range(done, n_batches):
         t0 = time.time()
@@ -396,14 +460,20 @@ def _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, ce
                 continue
             path = rd.acc_path(j)
             n = int(e - s)
-            acc = ChunkAccumulator.load(path) if path.is_file() else ChunkAccumulator.zeros(n, n_cams)
+            acc = (ChunkAccumulator.load(path) if path.is_file()
+                   else ChunkAccumulator.zeros(n, n_cams, llr=model is not None))
             if acc.last_batch >= b:
                 continue  # committed before the interruption
-            xyz_src = ply.xyz(selection.source_index(int(s), int(e)))
+            src_sel = selection.source_index(int(s), int(e))
+            xyz_src = ply.xyz(src_sel)
             xyz_chunk = frame.to_chunk(xyz_src)
+            geo.start_chunk(ply.normals(src_sel) if need_normals else None,
+                            selection.source_index_array(int(s), int(e)) if obs_log is not None else None)
             for k in touching:
                 _observe(k, selected[k][1], projectors[k], centers_src[k], xyz_src, xyz_chunk, acc, maps,
-                         provider, occ, abs_tol, cfg)
+                         provider, occ, abs_tol, cfg, geo)
+            if obs_log is not None and geo.records:
+                obs_log.write(j, b, geo.records)  # before the commit: a replayed batch rewrites the same file
             acc.last_batch = b
             acc.save_atomic(path)
             touched += 1
@@ -415,7 +485,48 @@ def _accumulate(cfg, rd, project, selected, ply, selection, provider, ranges, ce
                  [selected[k][1].stem for k in cams], touched, time.time() - t0)
 
 
-def _observe(k, cam, projector, center_src, xyz_src, xyz_chunk, acc, maps, provider, occ, abs_tol, cfg):
+class _ViewGeometry:
+    """Per-view GSD / incidence for the llr fusions and the observation log (unused by the plain mean)."""
+
+    def __init__(self, scale_to_source: float, model, obs_log):
+        self.scale = scale_to_source
+        self.model = model
+        self.obs_log = obs_log
+        self.normals = None
+        self.source_index = None
+        self.keep = None
+        self.records: list[np.ndarray] = []
+
+    @property
+    def active(self) -> bool:
+        return self.model is not None or self.obs_log is not None
+
+    def start_chunk(self, normals_src, source_index) -> None:
+        self.normals = normals_src
+        self.source_index = source_index
+        self.keep = self.obs_log.keep_mask(source_index) if self.obs_log is not None else None
+        self.records = []
+
+    def observe(self, k, calib, proj, idx, xyz_src, center_src, probs, map_scale: float):
+        """Return the per-view evidence (or None) and log the records."""
+        depth = proj.depth[idx]
+        gsd_frontal = depth * self.scale / calib.f
+        cos = cos_incidence(xyz_src[idx], self.normals[idx], center_src) if self.normals is not None else None
+        llr = None
+        if self.model is not None:
+            g = self.model.view_gsd(gsd_frontal, cos, map_scale) if self.model.mode == "censored_llr" else None
+            llr = self.model.view_llr(probs, g)
+        if self.obs_log is not None:
+            sel = slice(None) if self.keep is None else self.keep[idx]
+            rec = make_records(self.source_index[idx][sel], k, proj.u[idx][sel], proj.v[idx][sel], depth[sel],
+                               gsd_frontal[sel], None if cos is None else cos[sel], map_scale, probs[sel],
+                               np.linalg.norm(xyz_src[idx][sel] - center_src, axis=1))
+            if len(rec):
+                self.records.append(rec)
+        return llr
+
+
+def _observe(k, cam, projector, center_src, xyz_src, xyz_chunk, acc, maps, provider, occ, abs_tol, cfg, geo=None):
     calib = projector.calib
     proj = projector.project(xyz_chunk)
     inside = np.nonzero(proj.in_image)[0]
@@ -436,9 +547,37 @@ def _observe(k, cam, projector, center_src, xyz_src, xyz_chunk, acc, maps, provi
                                         cfg.interpolation)
     idx = inside[valid]
     probs = probs[valid]
-    acc.add_view(idx, probs, cfg.vote_threshold)
+    llr = None
+    if geo is not None and geo.active:
+        map_scale = calib.width / maps[k].probs.shape[2] * cfg.inference_scale
+        llr = geo.observe(k, calib, proj, idx, xyz_src, center_src, probs, map_scale)
+    acc.add_view(idx, probs, cfg.vote_threshold, llr)
     stats[4] += len(idx)
     stats[len(CAMERA_STAT_FIELDS):] += (np.nan_to_num(probs, nan=-1.0) >= cfg.vote_threshold).sum(axis=0)
+
+
+def _write_observation_meta(obs_log, selected, project, provider, frame) -> None:
+    cams = []
+    for k, (pos, cam) in enumerate(selected):
+        calib = project.calibration_for(cam)
+        cams.append({"camera": k, "position": pos, "label": cam.label, "stem": cam.stem, "f_px": calib.f,
+                     "width": calib.width, "height": calib.height})
+    obs_log.dir.mkdir(parents=True, exist_ok=True)
+    calibration_prevalence = None
+    if isinstance(provider, CalibratedProvider):
+        from .fusion_params import calibration_priors
+        calibration_prevalence = calibration_priors(provider.calibration_path)
+    write_json_atomic(obs_log.dir / "meta.json", {
+        "schema": 3, "cameras": cams, "classes": list(DAMAGE_CLASSES), "provider": provider.describe(),
+        "calibration_prevalence": calibration_prevalence,
+        "units": {"u_v": "full-image px, Metashape corner convention", "depth": "chunk units (camera Z)",
+                  "gsd_frontal": "source units per full-image px = depth * scale / f",
+                  "scale_chunk_to_source": frame.length_to_source(1.0),
+                  "cos_theta": "|cos| between source normal and viewing ray",
+                  "range_source": "Euclidean camera-to-point distance in source units",
+                  "map_scale": "(full-image width / probability-map width) * inference_scale",
+                  "g": "gsd_frontal * map_scale / sqrt(max(cos_theta,min_cos)); source units per effective map px"},
+        "subset": "all" if obs_log.subset is None else int(obs_log.subset.size)})
 
 
 def _write_selected_cameras(path: Path, rows: list[dict]) -> None:

@@ -73,6 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="'0.5' or 'crack=0.5,spalling=0.5,...' (overrides the JSON thresholds); default: "
                         "frozen thresholds of --calibration/--ensemble, else 0.5. Synthetic runs: TEST thresholds")
     g.add_argument("--min-views", type=int, default=1)
+    g.add_argument("--fusion", choices=("mean", "llr", "censored_llr"), default="mean",
+                   help="mean probability; naive-Bayes log-odds; resolution-censored log-odds "
+                        "(damage3d/detectability.py). llr fusions are accumulated: fixed for --resume")
+    g.add_argument("--fusion-params", help="JSON with class rho (+ g50, beta, alpha) for the llr fusions")
+    g.add_argument("--inference-scale", type=float, default=1.0,
+                   help="additional inference resize factor not already in photo/map width ratio")
+    g.add_argument("--observation-log", action="store_true",
+                   help="write <run>/observations: one record per valid point-view (u, v, depth, GSD, cos, probs)")
+    g.add_argument("--observation-subset", help=".npy of source indices to log (e.g. roi_points_index.npy)")
     g.add_argument("--export-scope", choices=("all", "observed", "damage"), default="all")
     g.add_argument("--normals", choices=("auto", "source", "none"), default="auto",
                    help="copy nx/ny/nz of the source PLY into fused_points.ply (auto: when present)")
@@ -137,6 +146,11 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         vote_threshold=args.vote_threshold,
         thresholds=args.thresholds,
         min_views=args.min_views,
+        fusion=args.fusion,
+        fusion_params=resolve_path(root, args.fusion_params, None),
+        inference_scale=args.inference_scale,
+        observation_log=args.observation_log,
+        observation_subset=resolve_path(root, args.observation_subset, None),
         export_scope=args.export_scope,
         normals=args.normals,
         csv_max_points=args.csv_max_points,

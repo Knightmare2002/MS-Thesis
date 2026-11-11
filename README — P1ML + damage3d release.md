@@ -16,6 +16,20 @@ It contains:
 All paths are relative to the folder that contains this README (the *release root*).
 Nothing has to be edited after unzipping.
 
+## Direction A experimental extension
+
+The Direction A patch adds class-dependent resolvability inside a marginalized
+observation likelihood, with spatially separated fitting/calibration/testing,
+same-observation baselines and reproducible evaluation. The original mean fusion
+remains the default; no detector retraining or changes to unrelated experiments
+are required.
+
+See `damage3d/README.md`, section “Direction A”, for the complete change log,
+input schemas, executable PowerShell commands and limitations. The derivation,
+identification correction and publication-novelty audit are in
+`damage3d/DIRECTION_A_METHOD.md`; software validation does not establish real
+bridge accuracy or guarantee novelty.
+
 ---
 
 ## Layout

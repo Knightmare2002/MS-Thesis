@@ -8,7 +8,11 @@ Per point i and class c (all counts over VALID views only):
 * ``n_views[i]``   = number of geometrically valid views (in front, inside the
   image, radial guard passed, not occluded, provider pixel valid).
 
-Fused score: mean probability  s(i, c) = sum / count  (NaN if count = 0).
+Fused score (``--fusion``):
+* ``mean`` (default): s(i, c) = sum / count  (NaN if count = 0);
+* ``llr`` / ``censored_llr``: s(i, c) = sigmoid(logit rho_c + alpha_c * llr[i, c]), with
+  ``llr[i, c]`` = sum of the per-view (censored) evidence, see ``damage3d.detectability``.
+  ``sum``/``count`` are accumulated as well, so the mean stays available (``score_mean``).
 Label: l(i, c) = [count >= min_views] and [s(i, c) >= threshold_c]; classes
 are independent, several labels can be true on the same point.
 
@@ -45,9 +49,10 @@ class ChunkAccumulator:
     n_views: np.ndarray      # (n,) uint16
     camera_stats: np.ndarray  # (n_cameras, len(CAMERA_STAT_FIELDS) + C) int64, per selected camera
     last_batch: int          # index of the last camera batch applied (-1 = none)
+    llr: np.ndarray | None = None  # (n, C) float32 summed evidence (llr fusions only)
 
     @classmethod
-    def zeros(cls, n: int, n_cameras: int) -> "ChunkAccumulator":
+    def zeros(cls, n: int, n_cameras: int, llr: bool = False) -> "ChunkAccumulator":
         return cls(
             sum=np.zeros((n, NUM_CLASSES), dtype=np.float32),
             count=np.zeros((n, NUM_CLASSES), dtype=COUNT_DTYPE),
@@ -55,10 +60,14 @@ class ChunkAccumulator:
             n_views=np.zeros(n, dtype=COUNT_DTYPE),
             camera_stats=np.zeros((n_cameras, len(CAMERA_STAT_FIELDS) + NUM_CLASSES), dtype=np.int64),
             last_batch=-1,
+            llr=np.zeros((n, NUM_CLASSES), dtype=np.float32) if llr else None,
         )
 
-    def add_view(self, local_idx: np.ndarray, probs: np.ndarray, vote_threshold: float) -> None:
-        """Add one camera's observations. ``local_idx`` must be unique."""
+    def add_view(self, local_idx: np.ndarray, probs: np.ndarray, vote_threshold: float,
+                 llr: np.ndarray | None = None) -> None:
+        """Add one camera's observations. ``local_idx`` must be unique; ``llr`` (n_obs, C) per-view evidence."""
+        if (llr is None) != (self.llr is None):
+            raise ValueError("Per-view evidence must be given iff the accumulator stores llr.")
         if local_idx.size == 0:
             return
         if int(self.n_views[local_idx].max()) >= MAX_VIEWS:
@@ -72,14 +81,17 @@ class ChunkAccumulator:
             self.sum[idx, c] += p
             self.count[idx, c] += 1
             self.votes[idx, c] += (p >= vote_threshold).astype(COUNT_DTYPE)
+            if llr is not None:
+                self.llr[idx, c] += llr[ok, c].astype(np.float32)
 
     # ---- atomic persistence -------------------------------------------------
     def save_atomic(self, path: Path) -> None:
         path = Path(path)
         tmp = path.with_name(path.name + ".tmp")
         with tmp.open("wb") as f:
+            extra = {} if self.llr is None else {"llr": self.llr}
             np.savez(f, sum=self.sum, count=self.count, votes=self.votes, n_views=self.n_views,
-                     camera_stats=self.camera_stats, last_batch=np.int64(self.last_batch))
+                     camera_stats=self.camera_stats, last_batch=np.int64(self.last_batch), **extra)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -88,7 +100,8 @@ class ChunkAccumulator:
     def load(cls, path: Path) -> "ChunkAccumulator":
         with np.load(path, allow_pickle=False) as d:
             return cls(sum=d["sum"], count=d["count"], votes=d["votes"], n_views=d["n_views"],
-                       camera_stats=d["camera_stats"], last_batch=int(d["last_batch"]))
+                       camera_stats=d["camera_stats"], last_batch=int(d["last_batch"]),
+                       llr=d["llr"] if "llr" in d.files else None)
 
 
 def parse_thresholds(text: str | None, default: float = 0.5) -> np.ndarray:
@@ -120,12 +133,20 @@ class FusedChunk:
     state: np.ndarray        # (n,) uint8
     dominant: np.ndarray     # (n,) int8, class used for the color (-1 if none)
     rgb: np.ndarray          # (n, 3) uint8
+    score_mean: np.ndarray | None = None  # (n, C) mean probability when score is an llr posterior
 
 
-def fuse(acc: ChunkAccumulator, thresholds: np.ndarray, min_views: int) -> FusedChunk:
+def fuse(acc: ChunkAccumulator, thresholds: np.ndarray, min_views: int, model=None) -> FusedChunk:
+    """``model``: ``detectability.FusionModel`` for llr fusions, None for the mean."""
     count = acc.count.astype(np.int64)
     with np.errstate(invalid="ignore", divide="ignore"):
-        score = np.where(count > 0, acc.sum / np.maximum(count, 1), np.nan).astype(np.float32)
+        mean = np.where(count > 0, acc.sum / np.maximum(count, 1), np.nan).astype(np.float32)
+    if model is None:
+        score, score_mean = mean, None
+    else:
+        if acc.llr is None:
+            raise ValueError("This run did not accumulate llr evidence (it was run with --fusion mean).")
+        score, score_mean = model.posterior(acc.llr, count), mean
     enough = count >= min_views
     labels = enough & (np.nan_to_num(score, nan=-1.0) >= thresholds[None, :])
     label_mask = (labels.astype(np.uint8) << np.arange(NUM_CLASSES, dtype=np.uint8)[None, :]).sum(axis=1).astype(np.uint8)
@@ -145,4 +166,5 @@ def fuse(acc: ChunkAccumulator, thresholds: np.ndarray, min_views: int) -> Fused
         rgb[state == s] = color
     dmg = state == STATE_DAMAGE
     rgb[dmg] = palette[dominant[dmg]]
-    return FusedChunk(score=score, labels=labels, label_mask=label_mask, state=state, dominant=dominant, rgb=rgb)
+    return FusedChunk(score=score, labels=labels, label_mask=label_mask, state=state, dominant=dominant, rgb=rgb,
+                      score_mean=score_mean)
