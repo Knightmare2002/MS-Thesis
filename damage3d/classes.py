@@ -61,7 +61,7 @@ STATE_NAMES = {
 
 STATE_COLORS: dict[int, tuple[int, int, int]] = {
     STATE_NOT_OBSERVED: (40, 70, 160),         # dark blue
-    STATE_INSUFFICIENT_VIEWS: (90, 90, 90),    # dark grey
+    STATE_INSUFFICIENT_VIEWS: (255, 0, 255),   # magenta (was dark grey 90,90,90: too close to light grey)
     STATE_OBSERVED_NO_DAMAGE: (200, 200, 200), # light grey
 }
 

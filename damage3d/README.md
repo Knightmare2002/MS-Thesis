@@ -122,7 +122,7 @@ A class label is positive when `views_c >= --min-views` and `score_c >= threshol
 | state | value | meaning | RGB |
 |---|---|---|---|
 | not_observed | 0 | no valid view. **Never shown as healthy.** | dark blue (40, 70, 160) |
-| insufficient_views | 1 | seen, but some class has fewer than `min_views` valid views | dark grey (90, 90, 90) |
+| insufficient_views | 1 | seen, but some class has fewer than `min_views` valid views | magenta (255, 0, 255); dark grey (90, 90, 90) before 2026-11-11 |
 | observed_no_damage | 2 | every class has at least `min_views` views and no label | light grey (200, 200, 200) |
 | damage | 3 | at least one positive label | colour of the dominant class |
 
@@ -506,6 +506,7 @@ domain-data preparation steps, not silently approximated by model predictions.
 `--export-scope all|observed|damage` controls which points are written.
 `--normals` is an export option: changing it with `--resume` on a finished run only rewrites the outputs (no re-accumulation).
 For runs exported before `--normals` existed: `python -m damage3d.add_normals --fused <run>/outputs/fused_points.ply --source <project>/bridge_3dpc_point_cloud.ply` writes `fused_points_normals.ply` next to it (inputs untouched, coordinates checked against the source).
+To change state colors without re-running inference or projection: `python -m damage3d.recolor --ply <run>/outputs/fused_points.ply [--state-color insufficient_views=R,G,B]` writes `fused_points_recolored.ply` (only red/green/blue of non-damage points change; default = current `STATE_COLORS`).
 
 Run-level files:
 - `manifest.json` (fingerprint);

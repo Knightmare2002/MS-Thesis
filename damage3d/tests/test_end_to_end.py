@@ -217,3 +217,32 @@ def test_add_normals_to_existing_export_matches_direct_export(project_tf, tmp_pa
     b.close()
     with pytest.raises(RuntimeError):
         add_normals_main(["--fused", str(fused), "--source", str(src_ply), "--out", str(fused)])
+
+
+def test_recolor_changes_only_state_colors(project_tf, tmp_path):
+    from damage3d.classes import STATE_INSUFFICIENT_VIEWS, STATE_NOT_OBSERVED
+    from damage3d.recolor import main as recolor_main
+    out = tmp_path / "recolor"
+    _run(project_tf, out, "--camera", "DSC01020", "--max-points", "3000", "--min-views", "2")
+    ply_path = out / "outputs" / "fused_points.ply"
+    before = ply_path.read_bytes()
+    assert recolor_main(["--ply", str(ply_path), "--chunk", "700",
+                         "--state-color", "insufficient_views=1,2,3"]) == 0
+    assert ply_path.read_bytes() == before                                # input untouched
+    a = PlyPointSource(ply_path)
+    b = PlyPointSource(out / "outputs" / "fused_points_recolored.ply")
+    ra, rb = np.asarray(a._mm), np.asarray(b._mm)
+    assert a.header.dtype == b.header.dtype
+    for n in ra.dtype.names:
+        if n not in ("red", "green", "blue"):
+            np.testing.assert_array_equal(ra[n], rb[n])
+    ins = rb["state"] == STATE_INSUFFICIENT_VIEWS
+    assert ins.any()
+    assert (rb["red"][ins] == 1).all() and (rb["green"][ins] == 2).all() and (rb["blue"][ins] == 3).all()
+    dmg = rb["state"] == 3
+    np.testing.assert_array_equal(ra["red"][dmg], rb["red"][dmg])          # damage colors kept
+    assert (rb["blue"][rb["state"] == STATE_NOT_OBSERVED] == 160).all()
+    a.close()
+    b.close()
+    with pytest.raises(SystemExit):
+        recolor_main(["--ply", str(ply_path), "--state-color", "damage=1,2,3"])
