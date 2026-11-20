@@ -18,7 +18,7 @@ from .frames import resolve_frame
 from .fusion import CAMERA_STAT_FIELDS, ChunkAccumulator, parse_thresholds
 from .observations import ObservationLog, cos_incidence, make_records
 from .metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras
-from .ply_io import PlyPointSource, make_selection
+from .ply_io import PlyPointSource, PointSelection, make_selection
 from .providers import CalibratedProvider, EnsembleProvider, FileProvider, SyntheticProvider
 from .run_state import RunDirectory, file_identity, normalise, short_hash, write_json_atomic
 from .sampling import sample_probabilities
@@ -74,6 +74,7 @@ class RunConfig:
     fusion_params: Path | None = None        # JSON: class rho (+ g50, beta for censored_llr; alpha)
     observation_log: bool = False            # write <run>/observations (damage3d/observations.py)
     observation_subset: Path | None = None   # .npy of source indices to log (default: all points)
+    roi_only: bool = False                   # process ONLY the observation-subset points (T7 ROI log)
     inference_scale: float = 1.0            # additional resize not already captured by W/W_m
     export_scope: str = "all"
     normals: str = "auto"  # auto | source | none
@@ -177,6 +178,18 @@ def _compute_chunk_bounds(ply, selection, ranges, frame) -> tuple[np.ndarray, np
     return centers, radii
 
 
+def _roi_selection(cfg, ply) -> PointSelection:
+    """--roi-only: the point selection IS the observation subset (sorted, unique)."""
+    if not cfg.observation_log or cfg.observation_subset is None:
+        raise RuntimeError("--roi-only requires --observation-log and --observation-subset.")
+    if cfg.max_points is not None:
+        raise RuntimeError("--roi-only and --max-points are mutually exclusive.")
+    idx = np.unique(np.load(cfg.observation_subset).astype(np.int64))
+    if idx.size == 0 or idx[0] < 0 or idx[-1] >= ply.n_points:
+        raise RuntimeError(f"{cfg.observation_subset}: source indices outside [0, {ply.n_points}).")
+    return PointSelection(ply.n_points, idx, "observation_subset", None)
+
+
 def _estimate_tolerance(cfg, occ, ply, selection) -> dict:
     n = min(cfg.tolerance_sample_size, selection.size)
     positions = (np.arange(n, dtype=np.int64) * selection.size) // n
@@ -213,7 +226,10 @@ def plan(cfg: RunConfig) -> dict:
             raise RuntimeError(f"Camera {cam.label}: non-zero {list(calib.unsupported_nonzero)} not supported.")
 
     ply = PlyPointSource(cfg.point_cloud)
-    selection = make_selection(ply.n_points, cfg.max_points, cfg.sample_mode, cfg.seed)
+    if cfg.roi_only:
+        selection = _roi_selection(cfg, ply)
+    else:
+        selection = make_selection(ply.n_points, cfg.max_points, cfg.sample_mode, cfg.seed)
     provider = _build_provider(cfg)
     missing_maps = provider.check_available([c.stem for _, c in selected])
     if missing_maps:
@@ -299,7 +315,9 @@ def run(cfg: RunConfig) -> dict:
     abs_tol = 0.0
     if occ is not None:
         if cfg.occlusion_tolerance is None:
-            tolerance_record.update(_estimate_tolerance(cfg, occ, ply, selection))
+            # Full cloud even with --roi-only: same occlusion tolerance as a full run.
+            tol_sel = make_selection(ply.n_points, None) if cfg.roi_only else selection
+            tolerance_record.update(_estimate_tolerance(cfg, occ, ply, tol_sel))
             abs_tol = float(tolerance_record["auto_tolerance"])
             tolerance_record["source"] = "auto: max(P95 point-to-mesh distance, 1e-4 * mesh diagonal)"
         else:

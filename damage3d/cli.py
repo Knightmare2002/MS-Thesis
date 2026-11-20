@@ -82,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--observation-log", action="store_true",
                    help="write <run>/observations: one record per valid point-view (u, v, depth, GSD, cos, probs)")
     g.add_argument("--observation-subset", help=".npy of source indices to log (e.g. roi_points_index.npy)")
+    g.add_argument("--roi-only", action="store_true",
+                   help="project/accumulate/export ONLY the --observation-subset points (much faster ROI log)")
     g.add_argument("--export-scope", choices=("all", "observed", "damage"), default="all")
     g.add_argument("--normals", choices=("auto", "source", "none"), default="auto",
                    help="copy nx/ny/nz of the source PLY into fused_points.ply (auto: when present)")
@@ -151,6 +153,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         inference_scale=args.inference_scale,
         observation_log=args.observation_log,
         observation_subset=resolve_path(root, args.observation_subset, None),
+        roi_only=args.roi_only,
         export_scope=args.export_scope,
         normals=args.normals,
         csv_max_points=args.csv_max_points,

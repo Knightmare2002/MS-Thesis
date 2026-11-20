@@ -22,6 +22,11 @@ Inputs
 * ROI points: dense-cloud points within +-slab of the polygon plane whose
   projection lies inside the polygon (``--slab``, default 1% of the polygon
   bounding-box diagonal), seeded subsample of ``--max-roi-points``.
+* ``--surface-depth D`` (recesses/cavities): signed plane distance d (positive towards the
+  outside, from the dense-cloud normals or ``--outward-sign``) restricted to [-D, +slab];
+  inside that prism only the 3D connected components (voxel ``--surface-voxel``, 26-neighbour)
+  that touch the +-slab layer are kept. The result contains the slab ROI, extends only into
+  the material, and excludes surfaces separated by an empty gap (back faces, opposite facade).
 * Normal for the incidence angle: the polygon plane (default) or the
   dense-cloud normals (``--normals cloud``).
 * ``--camera-list``: the views already saved in Metashape for this ROI; the
@@ -132,18 +137,27 @@ class PlanarPolygon:
 
     @staticmethod
     def fit(vertices: np.ndarray) -> "PlanarPolygon":
+        #Fit a plane to the vertices
         c = vertices.mean(axis=0)
         _, _, vt = np.linalg.svd(vertices - c)
+
+        # The normal is the last singular vector; the first two are an orthonormal basis of the plane.
         n = vt[2] / np.linalg.norm(vt[2])
         uv = (vertices - c) @ vt[:2].T
         x, y = uv[:, 0], uv[:, 1]
+
+        # Compute the area of the polygon using the shoelace formula in the plane coordinates.
         area = 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
         return PlanarPolygon(vertices, c, vt[:2], n, uv, float(np.abs((vertices - c) @ n).max()), area)
 
     def contains(self, xyz: np.ndarray, slab: float) -> np.ndarray:
         """Points within +-slab of the plane whose projection lies inside the polygon (even-odd rule)."""
         d = xyz - self.origin
-        keep = np.abs(d @ self.normal) <= slab
+        keep = (
+            np.ones(len(xyz), dtype=bool)
+            if slab is None
+            else np.abs(d @ self.normal) <= slab
+        )
         q = d[keep] @ self.axes.T
         inside = np.zeros(len(q), bool)
         a, b = self.uv, np.roll(self.uv, -1, axis=0)
@@ -181,17 +195,96 @@ def polygon_to_source(vertices: np.ndarray, polygon_frame: str, frame, chunk_tra
     raise RuntimeError(f"Polygon frame check inconclusive {d}: pass --polygon-frame chunk|transformed.")
 
 
-def select_roi_points(ply: PlyPointSource, poly: PlanarPolygon, slab: float, block: int = 2_000_000):
-    """Stream the dense cloud and return the indices of the points inside the polygon prism."""
-    lo = poly.vertices.min(0) - slab
-    hi = poly.vertices.max(0) + slab
+def outward_sign(ply, idx, normal, override=None, min_agreement=0.8) -> tuple[int, dict]:
+    """+1 if the polygon normal points outwards (towards the cameras), from dense-cloud normals."""
+    if override is not None:
+        return int(override), {"source": "CLI --outward-sign", "sign": int(override)}
+    if not ply.has_normals:
+        raise RuntimeError("--surface-depth needs nx,ny,nz in the dense cloud or --outward-sign +1|-1.")
+    dots = ply.normals(idx).astype(np.float64) @ normal
+    pos = float(np.mean(dots > 0))
+    agree = max(pos, 1 - pos)
+    if agree < min_agreement:
+        raise RuntimeError(f"Dense-cloud normals disagree on the outward side ({agree:.2f} < {min_agreement}): "
+                           "pass --outward-sign.")
+    sign = 1 if pos >= 0.5 else -1
+    return sign, {"source": "dense-cloud normals of the slab points", "sign": sign, "agreement": agree}
+
+
+def select_surface_points(ply, poly, slab, depth, voxel, sign_override=None, block=2_000_000):
+    """Slab ROI extended into the material: d in [-depth, +slab], connected to the +-slab layer."""
+    if not (0 < slab < depth) or voxel <= 0:
+        raise ValueError("Need 0 < slab < --surface-depth and --surface-voxel > 0.")
+    lo, hi = poly.vertices.min(0) - depth, poly.vertices.max(0) + depth
+    cand, dist, plane = [], [], []
+    for s in range(0, ply.n_points, block):
+        e = min(s + block, ply.n_points)
+        xyz = ply.xyz(slice(s, e)).astype(np.float64)
+        box = np.flatnonzero(np.all((xyz >= lo) & (xyz <= hi), axis=1))
+        if box.size:
+            box = box[poly.contains(xyz[box], depth)]
+            rel = xyz[box] - poly.origin
+            cand.append(s + box)
+            dist.append(rel @ poly.normal)
+            plane.append(rel @ poly.axes.T)
+    if not cand:
+        return np.zeros(0, np.int64), {}
+    cand, dist, plane = np.concatenate(cand), np.concatenate(dist), np.concatenate(plane)
+    seed = np.abs(dist) <= slab
+    if not seed.any():
+        raise RuntimeError("No point within +-slab of the polygon plane: check frame/polygon.")
+    sign, orient = outward_sign(ply, cand[seed], poly.normal, sign_override)
+    d = sign * dist                                   # > 0 outside, < 0 into the material
+    keep = (d >= -depth) & (d <= slab)
+    cand, d, plane, seed = cand[keep], d[keep], plane[keep], seed[keep]
+    from scipy import ndimage
+    coords = np.column_stack([plane, d])
+    ijk = np.floor((coords - coords.min(0)) / voxel).astype(np.int64)
+    shape = tuple(ijk.max(0) + 1)
+    if np.prod(shape, dtype=np.float64) > 3e8:
+        raise RuntimeError(f"Voxel grid {shape} too large: raise --surface-voxel.")
+    occ = np.zeros(shape, bool)
+    occ[tuple(ijk.T)] = True
+    lab, n_comp = ndimage.label(occ, structure=np.ones((3, 3, 3), bool))
+    point_lab = lab[tuple(ijk.T)]
+    seeds = np.unique(point_lab[seed])
+    sel = np.isin(point_lab, seeds)
+    sizes = np.bincount(point_lab, minlength=n_comp + 1)
+    dropped = [{"n_points": int(sizes[k]), "d_median": float(np.median(d[point_lab == k]))}
+               for k in np.argsort(-sizes) if k > 0 and k not in seeds and sizes[k] > 0][:10]
+    diag = {"mode": "surface_connected", "depth": depth, "slab_front": slab, "voxel": voxel,
+            "outward": orient, "n_prism_candidates": int(len(cand)), "n_slab_points": int(seed.sum()),
+            "n_selected": int(sel.sum()), "n_components": int(n_comp), "n_seed_components": int(len(seeds)),
+            "selected_d_min_max": [float(d[sel].min()), float(d[sel].max())],
+            "selected_d_p1_p50": [float(np.percentile(d[sel], 1)), float(np.percentile(d[sel], 50))],
+            "n_below_slab": int(np.sum(sel & ~seed)), "largest_dropped_components": dropped,
+            "depth_reached": bool(d[sel].min() <= -depth + voxel)}
+    return np.sort(cand[sel]), diag
+
+
+def select_roi_points(
+    ply, poly, slab, block=2_000_000
+):
+    if slab is not None:
+        lo = poly.vertices.min(0) - slab
+        hi = poly.vertices.max(0) + slab
+
     out = []
     for s in range(0, ply.n_points, block):
         e = min(s + block, ply.n_points)
         xyz = ply.xyz(slice(s, e)).astype(np.float64)
-        box = np.nonzero(np.all((xyz >= lo) & (xyz <= hi), axis=1))[0]
-        if box.size:
-            out.append(s + box[poly.contains(xyz[box], slab)])
+
+        if slab is None:
+            local = np.flatnonzero(poly.contains(xyz, None))
+        else:
+            box = np.flatnonzero(
+                np.all((xyz >= lo) & (xyz <= hi), axis=1)
+            )
+            local = box[poly.contains(xyz[box], slab)]
+
+        if local.size:
+            out.append(s + local)
+
     return np.concatenate(out) if out else np.zeros(0, np.int64)
 
 
@@ -409,13 +502,36 @@ def run(args, occ=None) -> dict:
                                               project.chunk_transform, occ.distance if occ is not None else None)
     poly = PlanarPolygon.fit(verts_src)
     extent = float(np.linalg.norm(verts_src.max(0) - verts_src.min(0)))
-    slab = args.slab if args.slab is not None else args.slab_frac * extent
-    if poly.residual_max > 0.5 * slab:
-        raise RuntimeError(f"Polygon {args.polygon_id} is not planar enough: max vertex-to-plane distance "
-                           f"{poly.residual_max:.4g} vs slab {slab:.4g}. Split it into planar parts or raise --slab.")
+    slab = (
+        None
+        if args.no_slab
+        else (
+            args.slab
+            if args.slab is not None
+            else args.slab_frac * extent
+        )
+    )
 
+    if args.surface_depth is not None and (args.no_slab or slab is None):
+        raise RuntimeError("--surface-depth and --no-slab are mutually exclusive.")
+    if slab is not None and poly.residual_max > 0.5 * slab:
+        raise RuntimeError(
+            f"Polygon {args.polygon_id} is not planar enough: "
+            f"max vertex-to-plane distance {poly.residual_max:.4g} "
+            f"vs slab {slab}."
+        )
+    
     ply = PlyPointSource(cloud_path)
-    idx = select_roi_points(ply, poly, slab)
+    selection = {"mode": "no_slab" if slab is None else "slab"}
+    if args.surface_depth is not None:
+        idx, selection = select_surface_points(ply, poly, slab, args.surface_depth, args.surface_voxel,
+                                               args.outward_sign)
+        log.info("Surface ROI: %s", {k: selection[k] for k in ("n_slab_points", "n_selected", "selected_d_min_max",
+                                                               "depth_reached")})
+        if selection["depth_reached"]:
+            log.warning("Selected points reach --surface-depth: the cut is the depth limit, not a gap.")
+    else:
+        idx = select_roi_points(ply, poly, slab)
     n_total = int(idx.size)
     np.save(out_dir / "roi_points_index.npy", idx.astype(np.int64))  # all ROI points: --observation-subset
     if n_total == 0:
@@ -512,7 +628,8 @@ def run(args, occ=None) -> dict:
         "roi": {"name": args.name, "polygons": str(polygons_path), "polygon_id": args.polygon_id,
                 "polygon_frame": poly_frame, "vertices_source": verts_src.tolist(),
                 "plane_normal": poly.normal.tolist(), "area_source_units2": poly.area,
-                "vertex_plane_residual_max": poly.residual_max, "slab": slab, "point_cloud": str(cloud_path),
+                "vertex_plane_residual_max": poly.residual_max, "slab": slab, "selection": selection,
+                "point_cloud": str(cloud_path),
                 "n_points_in_polygon": n_total, "n_points_used": len(xyz_src),
                 "point_to_plane_abs_p50_p95": [float(np.percentile(np.abs(plane_dist), q)) for q in (50, 95)],
                 "normals": normals_source, "mean_spacing_used_source_units": spacing},
@@ -562,6 +679,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--polygon-frame", choices=("auto", "chunk", "transformed"), default="auto",
                    help="frame of the polygon vertices (auto: vertex-to-mesh test)")
     g.add_argument("--slab", type=float, help="half thickness of the prism around the polygon plane (source units)")
+    g.add_argument("--no-slab", action="store_true", help="select points by projection inside the polygon, without a plane-distance limit")
+    g.add_argument("--surface-depth", type=float,
+                   help="extend the slab ROI into the material down to this plane distance (source units), "
+                        "keeping only points connected to the slab layer")
+    g.add_argument("--surface-voxel", type=float, default=0.03,
+                   help="voxel of the connectivity test (source units); gaps > ~2 voxels separate surfaces")
+    g.add_argument("--outward-sign", type=int, choices=(-1, 1),
+                   help="override: +1 if the fitted polygon normal points outwards")
     g.add_argument("--slab-frac", type=float, default=0.01, help="default slab = this x polygon bbox diagonal")
     g.add_argument("--max-roi-points", type=int, default=300_000, help="seeded subsample of the ROI points")
     g.add_argument("--seed", type=int, default=0)
