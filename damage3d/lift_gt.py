@@ -15,6 +15,7 @@ import argparse
 import csv
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,10 @@ from damage3d.classes import DAMAGE_CLASSES, NUM_CLASSES  # noqa: E402
 from damage3d.experiment_data import regions as check_regions  # noqa: E402
 from damage3d.observations import iter_observations  # noqa: E402
 from damage3d.ply_io import PlyPointSource  # noqa: E402
+
+
+def log(msg: str, t0: float) -> None:
+    print(f"[{time.time() - t0:6.1f}s] {msg}", flush=True)
 
 
 def combine(v1, v2, mode):
@@ -55,6 +60,7 @@ def agreement(v1, v2):
 
 
 def main(argv=None):
+    t0 = time.time()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", type=Path, required=True, help="T7 damage3d run (observation log)")
     ap.add_argument("--roi-blocks", type=Path, required=True, help="roi_blocks.npz from t7_roi_log prepare")
@@ -70,6 +76,7 @@ def main(argv=None):
     if a.out.exists():
         raise FileExistsError(f"{a.out}: choose a new output.")
 
+    log("Loading splits, summary, run metadata, and ROI blocks...", t0)
     with open(a.splits, newline="", encoding="utf-8-sig") as f:
         rows = {int(r["block_id"]): r for r in csv.DictReader(f)}
     summary = json.loads(a.summary.read_text(encoding="utf-8"))
@@ -79,31 +86,43 @@ def main(argv=None):
     rb = np.load(a.roi_blocks)
     ids, blocks = rb["source_index"].astype(np.int64), rb["block"].astype(int)
     n = len(ids)
-    if set(np.unique(blocks)) - rows.keys():
+    unique_blocks = np.unique(blocks)
+    if set(unique_blocks) - rows.keys():
         raise ValueError("Blocks in roi_blocks.npz missing from splits.csv.")
+    log(f"Loaded {n:,} ROI points across {len(unique_blocks)} blocks.", t0)
 
     # Pass 1: keep only (point, annotated view of its own block) records.
     view_cam = np.full((n, 2), -1, np.int64)
-    for b in np.unique(blocks):
+    for b in unique_blocks:
         for j, key in enumerate(("view1", "view2")):
             s = rows[b][key].strip()
             if s not in cam_of:
                 raise ValueError(f"Block {b}: annotated view {s} not in run cameras.")
             view_cam[blocks == b, j] = cam_of[s]
+
+    log("Pass 1: streaming observation log to collect annotated view projections...", t0)
     hits = {0: [], 1: []}
+    n_chunks = 0
     for rec in iter_observations(a.run, ids):
+        n_chunks += 1
         pos = np.searchsorted(ids, rec["source_index"])
         for j in (0, 1):
             m = rec["camera"] == view_cam[pos, j]
             hits[j].append((pos[m], rec["camera"][m].astype(int), rec["u"][m], rec["v"][m]))
+        if n_chunks % 25 == 0:
+            log(f"  ...processed {n_chunks} observation chunks", t0)
+    log(f"Pass 1 complete ({n_chunks} chunks read).", t0)
 
     # Pass 2: one GT image in memory at a time.
+    log("Pass 2: sampling 2D ground-truth masks onto 3D points...", t0)
     lab = np.full((2, n, NUM_CLASSES), -1, np.int8)
     for j in (0, 1):
         if not hits[j]:
             continue
         pos, cam, u, v = (np.concatenate(x) for x in zip(*hits[j]))
-        for k in np.unique(cam):
+        unique_cams = np.unique(cam)
+        log(f"  View {j + 1}: sampling {len(pos):,} projections across {len(unique_cams)} GT images...", t0)
+        for idx_c, k in enumerate(unique_cams, 1):
             stem = cams[k]["stem"]
             with np.load(a.gt_dir / f"{stem}_gt.npz", allow_pickle=False) as g:
                 target, valid, names = g["target"], g["valid"], g["classes"].tolist()
@@ -118,23 +137,33 @@ def main(argv=None):
             for c, name in enumerate(DAMAGE_CLASSES):
                 val = target[names.index(name), row, col].astype(np.int8)
                 lab[j, p[ok], c] = val[ok]
+            if idx_c % 5 == 0 or idx_c == len(unique_cams):
+                log(f"    [{idx_c}/{len(unique_cams)}] sampled {stem} ({int(ok.sum()):,} valid points)", t0)
+
+    log(f"Combining two-view labels with mode='{a.combine}'...", t0)
     labels = combine(lab[0], lab[1], a.combine)
 
+    log("Computing per-point areas and reading XYZ coordinates from PLY...", t0)
     area = np.empty(n)
-    for b in np.unique(blocks):
+    for b in unique_blocks:
         m = blocks == b
         area[m] = summary[f"block{b}"]["roi"]["area_source_units2"] / m.sum()
     xyz = PlyPointSource(a.ply).xyz(ids)
+
+    log(f"Saving compressed regions NPZ to {a.out}...", t0)
     out = {"source_index": ids, "region": np.array([rows[b]["group"] for b in blocks]),
            "split": np.array([rows[b]["split"] for b in blocks]), "xyz": xyz, "area": area,
            "labels": labels, "classes": np.array(DAMAGE_CLASSES), "block": blocks.astype(np.int16),
            "view_labels": np.moveaxis(lab, 0, 1)}  # (N,2,C) for audits
     a.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(a.out, **out)
+
+    log(f"Running contract check (buffer={a.buffer})...", t0)
     check_regions(a.out, a.buffer)  # contract: unique ids, no region across splits, buffer
 
+    log("Generating per-block agreement & coverage report JSON...", t0)
     report = {"combine": a.combine, "buffer": a.buffer, "n_points": n, "blocks": {}}
-    for b in np.unique(blocks):
+    for b in unique_blocks:
         m = blocks == b
         report["blocks"][int(b)] = {
             "group": rows[b]["group"], "split": rows[b]["split"], "n_points": int(m.sum()),
@@ -143,7 +172,10 @@ def main(argv=None):
             "positive_area_fraction": {nm: float(np.mean(labels[m, c] == 1)) for c, nm in enumerate(DAMAGE_CLASSES)},
             "view_agreement": agreement(lab[0, m], lab[1, m]),
             "point_spacing_mm_est": float(np.sqrt(area[m][0]) * a.mm_per_unit)}
-    a.out.with_suffix(".json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report_path = a.out.with_suffix(".json")
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    log(f"Done! Written {a.out} and {report_path}", t0)
     print(json.dumps({b: {k: r[k] for k in ("split", "n_points", "observed_view1", "observed_view2")}
                       for b, r in report["blocks"].items()}, indent=1))
     return 0

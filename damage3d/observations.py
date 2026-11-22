@@ -118,24 +118,80 @@ def load_observations(run_path: Path) -> np.ndarray:
     return data[np.lexsort((data["camera"], data["source_index"]))]
 
 
-def iter_observations(run_path: Path, source_ids=None):
-    """Read one point chunk across batches; filter ROI before concatenation."""
+def _member(values: np.ndarray, sorted_ids: np.ndarray | None) -> np.ndarray:
+    if sorted_ids is None:
+        return np.ones(len(values), bool)
+    pos = np.minimum(np.searchsorted(sorted_ids, values), len(sorted_ids) - 1)
+    return sorted_ids[pos] == values
+
+
+def iter_observations(run_path: Path, source_ids=None, max_records: int = 5_000_000):
+    """Yield records sorted by (source_index, camera), all views of a point in the same block.
+
+    A point chunk is read across its camera batches. If it holds more than ``max_records``
+    (ROI) records it is split into disjoint source-index ranges, so peak RAM is bounded by
+    ~max_records x 54 B x 3 (copy + sort) instead of the whole chunk.
+    """
     files = sorted((Path(run_path) / "observations").glob("chunk_*_batch_*.npy"))
     if not files:
         raise FileNotFoundError(f"No observation log in {run_path} (run with --observation-log).")
-    for _, batch_files in groupby(files, key=lambda p: p.name.split("_batch_")[0]):
-        parts = []
-        for f in batch_files:
+    if max_records < 1:
+        raise ValueError("max_records must be >= 1.")
+    ids = None if source_ids is None else np.unique(np.asarray(source_ids, dtype=np.int64))
+    for _, group in groupby(files, key=lambda p: p.name.split("_batch_")[0]):
+        arrays = []
+        for f in group:
             a = np.load(f, mmap_mode="r", allow_pickle=False)
             if a.dtype != OBS_DTYPE:
                 raise ValueError(f"{f}: incompatible observation schema; regenerate this run.")
-            parts.append(a if source_ids is None else a[np.isin(a["source_index"], source_ids)])
-        a = np.concatenate(parts)
-        a = a[np.lexsort((a["camera"], a["source_index"]))]
-        if len(a) > 1 and np.any((a["source_index"][1:] == a["source_index"][:-1]) &
-                                (a["camera"][1:] == a["camera"][:-1])):
-            raise ValueError("Duplicate point-camera observations.")
-        yield a
+            arrays.append(a)
+        # One contiguous copy of the index column per file (4 B/record), reused by every range.
+        cols = [np.array(a["source_index"], dtype=np.int64) for a in arrays]
+        # Records per source index (of the requested ids) -> range edges with <= max_records each.
+        if ids is not None:
+            keys, counts = ids, np.zeros(len(ids), np.int64)
+            for si in cols:
+                m = _member(si, ids)
+                counts += np.bincount(np.searchsorted(ids, si[m]), minlength=len(ids))
+        else:
+            lo_hi = [(int(si.min()), int(si.max())) for si in cols if len(si)]
+            if not lo_hi:
+                continue
+            base = min(x for x, _ in lo_hi)
+            counts = np.zeros(max(y for _, y in lo_hi) - base + 1, np.int64)
+            for si in cols:
+                if len(si):
+                    counts += np.bincount(si - base, minlength=len(counts))
+            keys = np.arange(base, base + len(counts), dtype=np.int64)
+        keep = counts > 0
+        if not keep.any():
+            continue
+        keys, cum = keys[keep], np.cumsum(counts[keep])
+        edges, start = [int(keys[0])], 0
+        while True:
+            done = int(cum[start - 1]) if start else 0
+            # first key that no longer fits; at least one point per block (a point may exceed the cap)
+            k = max(int(np.searchsorted(cum, done + max_records, side="right")), start + 1)
+            if k >= len(keys):
+                break
+            edges.append(int(keys[k]))
+            start = k
+        edges.append(int(np.iinfo(np.int64).max))
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            parts = []
+            for a, si in zip(arrays, cols):
+                m = (si >= lo) & (si < hi)
+                m[m] = _member(si[m], ids)
+                if m.any():
+                    parts.append(a[m])
+            if not parts:
+                continue
+            b = np.concatenate(parts)
+            b = b[np.lexsort((b["camera"], b["source_index"]))]
+            if len(b) > 1 and np.any((b["source_index"][1:] == b["source_index"][:-1]) &
+                                    (b["camera"][1:] == b["camera"][:-1])):
+                raise ValueError("Duplicate point-camera observations.")
+            yield b
 
 
 def probs_of(records: np.ndarray) -> np.ndarray:

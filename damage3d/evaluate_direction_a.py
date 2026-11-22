@@ -6,6 +6,7 @@ Threshold JSON: {method: {class: threshold}}. Bins JSON:
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 import numpy as np
 
@@ -16,7 +17,12 @@ from .fusion_benchmark import METHODS
 from .run_state import sha256_file
 
 
+def log(msg: str, t0: float) -> None:
+    print(f"[{time.time() - t0:6.1f}s] {msg}", flush=True)
+
+
 def main(argv=None):
+    t0 = time.time()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--scores", type=Path, required=True)
     ap.add_argument("--regions", required=True)
@@ -29,53 +35,81 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
-    if args.reference not in args.methods or not set(args.methods) <= set(METHODS) | {"oracle_best_view"}:
-        raise ValueError("Choose known methods and include the reference.")
+
+    log(f"Loading regions from {args.regions} (buffer={args.buffer})...", t0)
     d = regions(args.regions, args.buffer)
+    log(f"Loaded {len(d['source_index']):,} points.", t0)
+
+    log("Verifying SHA-256 provenance hashes for scores, regions, and thresholds...", t0)
     meta = read_json(args.scores.with_suffix(".json"))
-    if (meta["score_sha256"] != sha256_file(args.scores) or
-            meta["provenance"]["regions_sha256"] != sha256_file(args.regions)):
+    known = set(meta.get("methods", METHODS)) | {"oracle_best_view"}
+    if args.reference not in args.methods or not set(args.methods) <= known:
+        raise ValueError("Choose methods present in the score file and include the reference.")
+    scores_hash = sha256_file(args.scores)
+    regions_hash = sha256_file(args.regions)
+    if (meta["score_sha256"] != scores_hash or
+            meta["provenance"]["regions_sha256"] != regions_hash):
         raise ValueError("Score/region provenance mismatch.")
+
     thresholds, bins = read_json(args.thresholds), read_json(args.bins)
     if "_provenance" in thresholds:
         tp = thresholds["_provenance"]
-        if (tp["split"] != "C_cal" or tp["regions_sha256"] != sha256_file(args.regions) or
+        if (tp["split"] != "C_cal" or tp["regions_sha256"] != regions_hash or
                 tp["params_sha256"] != meta["params_sha256"]):
             raise ValueError("Thresholds were frozen for different regions or model parameters.")
+    log("Provenance verification passed.", t0)
+
+    log(f"Loading score arrays from {args.scores}...", t0)
     with np.load(args.scores, allow_pickle=False) as f:
         scores = {k: f[k] for k in f.files}
     if not np.array_equal(scores["source_index"], d["source_index"]):
         raise ValueError("Source-index alignment mismatch.")
-    result = {"scores_sha256": sha256_file(args.scores), "thresholds_sha256": sha256_file(args.thresholds),
+    log(f"Loaded {len(scores)} arrays; evaluating {len(args.methods)} methods (reference='{args.reference}').", t0)
+
+    result = {"scores_sha256": scores_hash, "thresholds_sha256": sha256_file(args.thresholds),
               "bins_sha256": sha256_file(args.bins), "split": "T", "seed": args.seed,
               "reference": args.reference, "classes": {},
               "note": "CI is candidate minus reference; NLL/Brier lower is better. AP is step PR area."}
+
+    n_classes = len(DAMAGE_CLASSES)
     for c, name in enumerate(DAMAGE_CLASSES):
+        log(f"[{c + 1}/{n_classes}] Evaluating class '{name}' on split T...", t0)
         base = (d["split"] == "T") & (d["labels"][:, c] >= 0)
         if not base.any():
+            log(f"  -> Skipping '{name}': no labelled T points found.", t0)
             result["classes"][name] = {"status": "no T labels"}
             continue
+
         available = {m: base & np.isfinite(scores[m][:, c]) for m in args.methods}
         common = np.logical_and.reduce(list(available.values()))
-        coverage = {m: float(d["area"][ok].sum()/d["area"][base].sum()) for m, ok in available.items()}
+        n_common = int(common.sum())
+        n_regions = len(np.unique(d["region"][common]))
+        log(f"  Common support: {n_common:,} points across {n_regions} regions.", t0)
+
+        coverage = {m: float(d["area"][ok].sum() / d["area"][base].sum()) for m, ok in available.items()}
         table = {"area_coverage": coverage, "common_area": float(d["area"][common].sum()),
-                 "labelled_area": float(d["area"][base].sum()), "n_regions": len(np.unique(d["region"][common])),
+                 "labelled_area": float(d["area"][base].sum()), "n_regions": n_regions,
                  "methods": {}, "strata": {}}
         thrs = {}
         for m in args.methods:
             thrs[m] = .5 if m == "oracle_best_view" else float(thresholds[m][name])
             if not 0 < thrs[m] < 1:
                 raise ValueError("Thresholds must be in (0,1).")
+
         y, area, r = d["labels"][common, c], d["area"][common], d["region"][common]
         ref = scores[args.reference][common, c]
-        for m in args.methods:
+        baseline = binary_metrics(y, ref, area, thrs[args.reference])
+
+        for idx_m, m in enumerate(args.methods, 1):
+            log(f"  Method [{idx_m}/{len(args.methods)}] '{m}' (thr={thrs[m]:.3f}, bootstrap={args.bootstrap})...", t0)
             p = scores[m][common, c]
             metrics = binary_metrics(y, p, area, thrs[m])
-            baseline = binary_metrics(y, ref, area, thrs[args.reference])
-            table["methods"][m] = {"metrics": metrics, "delta": {k: metrics[k]-baseline[k] for k in metrics}}
+            table["methods"][m] = {"metrics": metrics, "delta": {k: metrics[k] - baseline[k] for k in metrics}}
             if len(np.unique(r)) >= 2:
                 table["methods"][m]["paired_region_bootstrap"] = paired_bootstrap(
                     y, p, ref, area, r, thrs[m], thrs[args.reference], args.bootstrap, args.seed)
+
+        log(f"  Computing stratified metrics (g_min & incidence) for '{name}'...", t0)
         for field, key, value in (("g_min", "g_edges", scores["g_min"]),
                                   ("incidence", "incidence_edges",
                                    np.rad2deg(np.arccos(np.clip(scores["cos_median"], 0, 1))))):
@@ -84,7 +118,7 @@ def main(argv=None):
                 raise ValueError("Frozen bin edges must be finite and strictly increasing.")
             rows = []
             for i, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
-                ok = common & (value >= lo) & (value <= hi if i == len(edges)-2 else value < hi)
+                ok = common & (value >= lo) & (value <= hi if i == len(edges) - 2 else value < hi)
                 rows.append({"low": lo, "high": hi, "n": int(ok.sum()), "area": float(d["area"][ok].sum()),
                              "methods": {m: binary_metrics(d["labels"][ok, c], scores[m][ok, c],
                                                           d["area"][ok], thrs[m]) for m in args.methods}})
@@ -96,17 +130,20 @@ def main(argv=None):
                 for metric in ("iou", "f1", "ap", "nll", "brier"):
                     valid = [r for r in rows if np.isfinite(r["methods"][m][metric]) and r["area"] > 0]
                     if len(valid) >= 3:
-                        x = np.array([(r["low"]+r["high"])/2 for r in valid])
+                        x = np.array([(r["low"] + r["high"]) / 2 for r in valid])
                         yv = np.array([r["methods"][m][metric] for r in valid])
                         w = np.array([r["area"] for r in valid])
                         xc = x - np.average(x, weights=w)
-                        slopes[m][metric] = float(np.sum(w*xc*yv)/np.sum(w*xc*xc))
+                        slopes[m][metric] = float(np.sum(w * xc * yv) / np.sum(w * xc * xc))
                     else:
                         slopes[m][metric] = None
-            table["strata"][field+"_descriptive_linear_slopes"] = slopes
+            table["strata"][field + "_descriptive_linear_slopes"] = slopes
             table["strata"]["slope_note"] = "Area-weighted bin-midpoint OLS; >=3 populated bins; descriptive, not causal or a significance test."
         result["classes"][name] = table
+
+    log(f"Writing evaluation report to {args.out}...", t0)
     write_json(args.out, result)
+    log("Done!", t0)
     return 0
 
 

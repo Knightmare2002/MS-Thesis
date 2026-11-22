@@ -28,7 +28,7 @@ def main(argv=None):
     with np.load(a.scores, allow_pickle=False) as s:
         if not np.array_equal(s["source_index"], d["source_index"]):
             raise ValueError("Source index mismatch.")
-        for m in METHODS:
+        for m in [m for m in meta.get("methods", METHODS) if m != "oracle_best_view"]:
             result[m] = {}
             for c, name in enumerate(DAMAGE_CLASSES):
                 use = (d["split"] == "C_cal") & (d["labels"][:, c] >= 0) & np.isfinite(s[m][:, c])
