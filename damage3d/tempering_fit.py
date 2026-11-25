@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize_scalar
 
+from damage3d.tests.test_direction_a_experiments import params
+
 from .classes import DAMAGE_CLASSES
 from .detectability import FusionModel, _logit
 from .experiment_data import read_json, write_json, regions
@@ -52,12 +54,15 @@ def main(argv=None):
             meta["params_sha256"] != sha256_file(args.params) or
             meta["score_sha256"] != sha256_file(args.scores)):
         raise ValueError("Score/region/parameter provenance mismatch.")
-    model = FusionModel.from_dict("censored_llr", params)
+    model = FusionModel.from_dict("censored_llr", params, allow_excluded=True)
+    excluded = params.get("excluded_classes", {})
     diagnostics = {}
     with np.load(args.scores, allow_pickle=False) as scores:
         if not np.array_equal(d["source_index"], scores["source_index"]):
             raise ValueError("Source-index alignment mismatch.")
         for c, name in enumerate(DAMAGE_CLASSES):
+            if name in excluded:
+                continue
             use = (d["split"] == "C_cal") & (d["labels"][:, c] >= 0) & (scores["count"][:, c] > 0)
             if len(np.unique(d["region"][use])) < args.min_regions:
                 raise ValueError(f"{name}: insufficient labelled C_cal regions.")

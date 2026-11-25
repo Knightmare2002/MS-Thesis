@@ -19,6 +19,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     d = regions(a.regions, a.buffer)
     meta = read_json(a.scores.with_suffix(".json"))
+    excluded = meta.get("parameters", {}).get("excluded_classes", {})
     if meta.get("oracle"):
         raise ValueError("Use non-oracle scores for threshold selection.")
     if (meta["provenance"]["regions_sha256"] != sha256_file(a.regions) or
@@ -31,6 +32,8 @@ def main(argv=None):
         for m in [m for m in meta.get("methods", METHODS) if m != "oracle_best_view"]:
             result[m] = {}
             for c, name in enumerate(DAMAGE_CLASSES):
+                if name in excluded:
+                    continue
                 use = (d["split"] == "C_cal") & (d["labels"][:, c] >= 0) & np.isfinite(s[m][:, c])
                 if len(np.unique(d["labels"][use, c])) < 2:
                     raise ValueError(f"{m}/{name}: C_cal must contain both labels.")
@@ -41,6 +44,8 @@ def main(argv=None):
     result["_provenance"] = {"split": "C_cal", "regions_sha256": sha256_file(a.regions),
                              "params_sha256": meta["params_sha256"], "scores_sha256": sha256_file(a.scores),
                              "objective": "area-weighted F1; grid .01:.01:.99; ties highest threshold"}
+    if excluded:
+        result["_provenance"]["excluded_classes"] = excluded
     write_json(a.out, result)
     return 0
 

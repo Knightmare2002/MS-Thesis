@@ -1,0 +1,31 @@
+diff --git a/damage3d/evaluate_direction_a.py b/damage3d/evaluate_direction_a.py
+index 297a4c3..bcb4a95 100644
+--- a/damage3d/evaluate_direction_a.py
++++ b/damage3d/evaluate_direction_a.py
+@@ -29,10 +29,11 @@ def main(argv=None):
+     ap.add_argument("--seed", type=int, default=0)
+     ap.add_argument("--out", required=True)
+     args = ap.parse_args(argv)
+-    if args.reference not in args.methods or not set(args.methods) <= set(METHODS) | {"oracle_best_view"}:
+-        raise ValueError("Choose known methods and include the reference.")
+     d = regions(args.regions, args.buffer)
+     meta = read_json(args.scores.with_suffix(".json"))
++    known = set(meta.get("methods", METHODS)) | {"oracle_best_view"}
++    if args.reference not in args.methods or not set(args.methods) <= known:
++        raise ValueError("Choose methods present in the score file and include the reference.")
+     if (meta["score_sha256"] != sha256_file(args.scores) or
+             meta["provenance"]["regions_sha256"] != sha256_file(args.regions)):
+         raise ValueError("Score/region provenance mismatch.")
+diff --git a/damage3d/freeze_direction_a.py b/damage3d/freeze_direction_a.py
+index 02f563d..eff4220 100644
+--- a/damage3d/freeze_direction_a.py
++++ b/damage3d/freeze_direction_a.py
+@@ -28,7 +28,7 @@ def main(argv=None):
+     with np.load(a.scores, allow_pickle=False) as s:
+         if not np.array_equal(s["source_index"], d["source_index"]):
+             raise ValueError("Source index mismatch.")
+-        for m in METHODS:
++        for m in [m for m in meta.get("methods", METHODS) if m != "oracle_best_view"]:
+             result[m] = {}
+             for c, name in enumerate(DAMAGE_CLASSES):
+                 use = (d["split"] == "C_cal") & (d["labels"][:, c] >= 0) & np.isfinite(s[m][:, c])

@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 import numpy as np
 
+from damage3d.tests.test_direction_a_experiments import params
+
 from .classes import DAMAGE_CLASSES, NUM_CLASSES
 from .detectability import FusionModel
 from .experiment_data import (read_json, write_json, regions, provenance, match_rows,
@@ -129,14 +131,31 @@ def main(argv=None):
     params = read_json(args.params)
     validate_detector(args.run, params)
     validate_fit_provenance(params, prov)
-    model = FusionModel.from_dict("censored_llr", params)
+    model = FusionModel.from_dict("censored_llr", params, allow_excluded=True)
+    excluded = params.get("excluded_classes", {})
     meta = read_json(Path(args.run) / "observations/meta.json")
     cameras = camera_subset([c["camera"] for c in meta["cameras"]], args.fraction, args.seed)
-    uncensored_alpha = ([params["tempering_diagnostics"][c]["uncensored_alpha"] for c in DAMAGE_CLASSES]
-                        if "tempering_diagnostics" in params else None)
-    weighted_alpha = ([params["tempering_diagnostics"][c]["weighted_alpha"] for c in DAMAGE_CLASSES]
-                      if "tempering_diagnostics" in params else None)
-    out = compute(args.run, d, model, cameras, uncensored_alpha, args.oracle, weighted_alpha)
+
+    diagnostics = params.get("tempering_diagnostics")
+
+    def alpha_vector(key):
+        if diagnostics is None:
+            return None
+        return [1.0 if name in excluded else diagnostics[name][key]
+                for name in DAMAGE_CLASSES]
+
+    uncensored_alpha = alpha_vector("uncensored_alpha")
+    weighted_alpha = alpha_vector("weighted_alpha")
+    out = compute(args.run, d, model, cameras, uncensored_alpha, args.oracle,
+                weighted_alpha)
+
+    for c, name in enumerate(DAMAGE_CLASSES):
+        if name in excluded:
+            for key in (*METHODS, "oracle_best_view", "llr", "censored_llr", "pi_llr"):
+                if key in out:
+                    out[key][:, c] = np.nan
+            out["count"][:, c] = 0
+    
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("wb") as f:
         np.savez_compressed(f, source_index=d["source_index"], classes=np.array(DAMAGE_CLASSES), **out)

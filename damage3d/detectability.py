@@ -77,10 +77,16 @@ class FusionModel:
 
     # ---- construction ------------------------------------------------------
     @staticmethod
-    def from_dict(mode: str, d: dict) -> "FusionModel":
+    def from_dict(mode: str, d: dict, *, allow_excluded: bool = False) -> "FusionModel":
         if mode not in ("llr", "censored_llr"):
             raise ValueError(f"FusionModel is for llr/censored_llr, got '{mode}'.")
         classes = d.get("classes", {})
+        excluded = d.get("excluded_classes", {})
+        if not isinstance(excluded, dict) or set(excluded) - set(DAMAGE_CLASSES):
+            raise ValueError("Invalid excluded_classes in fusion parameters.")
+        if excluded and (not allow_excluded or len(excluded) == NUM_CLASSES):
+            raise ValueError("Excluded classes are only supported by the offline H3 benchmark.")
+        active = np.array([name not in excluded for name in DAMAGE_CLASSES])
         unknown = set(classes) - set(DAMAGE_CLASSES) - set(CLOSED_CLASSES)
         if unknown:
             raise ValueError(f"Unknown classes in fusion params: {sorted(unknown)}")
@@ -94,13 +100,13 @@ class FusionModel:
             rho[c] = float(entry["rho"])
             base[c] = float(entry.get("base_rate", entry["rho"]))
             alpha[c] = float(entry.get("alpha", 1.0))
-            if mode == "censored_llr":
+            if mode == "censored_llr" and active[c]:
                 if not {"g50", "beta"} <= entry.keys():
                     raise ValueError(f"{name}: censored_llr requires g50 and beta; no silent fallback.")
                 g50[c], beta[c] = float(entry["g50"]), float(entry["beta"])
         if not np.isfinite(np.concatenate([rho, base, alpha])).all():
             raise ValueError("rho, base_rate and alpha must be finite.")
-        if mode == "censored_llr" and not np.isfinite(np.concatenate([g50, beta])).all():
+        if mode == "censored_llr" and not np.isfinite(np.concatenate([g50[active], beta[active]])).all():
             raise ValueError("g50 and beta must be finite.")
         if np.any((rho <= 0) | (rho >= 1)) or np.any((base <= 0) | (base >= 1)):
             raise ValueError("rho and base_rate must be in (0, 1).")
@@ -167,7 +173,7 @@ class FusionModel:
         logg = np.log(np.asarray(g, np.float64))[:, None]
         with np.errstate(invalid="ignore"):
             z = -(logg - np.log(self.g50)[None, :]) / self.beta[None, :]
-        pi = sigmoid(z)
+            pi = sigmoid(z)
         return np.where(np.isfinite(self.g50)[None, :], pi, 1.0)
 
     def view_llr(self, probs: np.ndarray, g: np.ndarray | None) -> np.ndarray:

@@ -14,6 +14,21 @@ from .detectability import FusionModel, sigmoid
 from .experiment_data import read_json, write_json, regions, provenance, match_rows, validate_detector
 from .observations import iter_observations, probs_of
 
+def unsupported_classes(d):
+    cal = d["split"] == "C_cal"
+    excluded = {}
+    for c, name in enumerate(DAMAGE_CLASSES):
+        y = d["labels"][cal, c]
+        reasons = []
+        if not (y == 1).any():
+            reasons.append("no_positive_C_cal_labels")
+        if not (y == 0).any():
+            reasons.append("no_negative_C_cal_labels")
+        if len(np.unique(d["region"][cal][y >= 0])) < 3:
+            reasons.append("fewer_than_three_labelled_C_cal_regions")
+        if reasons:
+            excluded[name] = reasons
+    return excluded
 
 def held_out_samples(obs, model, cfg, class_index):
     """Return candidate indices; the candidate's outcome never enters its reference."""
@@ -109,8 +124,16 @@ def main(argv=None):
     ap.add_argument("--bootstrap", type=int, default=0,
                     help="optional region bootstrap of g50/beta, conditional on fixed anchors (e.g. 200)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--skip-unsupported-classes", action="store_true")
     args = ap.parse_args(argv)
     d = regions(args.regions, args.buffer)
+    excluded = unsupported_classes(d) if args.skip_unsupported_classes else {}
+    active = [(c, name) for c, name in enumerate(DAMAGE_CLASSES)
+            if name not in excluded]
+    if not active:
+        raise ValueError(f"No class passes C_cal label support: {excluded}")
+    if excluded:
+        print(f"Excluded from H3 by C_cal label support: {excluded}", flush=True)
     prov = provenance(args.run, args.regions, args.config)
     cfg, params = read_json(args.config), read_json(args.params)
     validate_detector(args.run, params)
@@ -120,11 +143,11 @@ def main(argv=None):
     selected = d["source_index"][d["split"] == "C_fit"]
     if not len(selected):
         raise ValueError("No C_fit points.")
-    samples = {c: [] for c in DAMAGE_CLASSES}
+    samples = {name: [] for _, name in active}
     for obs in iter_observations(args.run, selected):
         if not len(obs):
             continue
-        for c, name in enumerate(DAMAGE_CLASSES):
+        for c, name in active:
             conf = {**cfg["common"], **cfg["classes"][name]}
             if not 0 < conf["threshold"] < 1 or not conf.get("anchor_source"):
                 raise ValueError("Declare threshold and anchor_source for every class.")
@@ -172,7 +195,13 @@ def main(argv=None):
                 "conditional_on": "fixed anchors, selected pseudo-positives and camera groups"}
     params.update(fit_provenance=prov, fit_split="C_fit", fit_buffer=args.buffer,
                   fit_diagnostics=diagnostics, fit_kind="anchored_leave_group_out_pseudo_positive")
-    FusionModel.from_dict("censored_llr", params)
+    if excluded:
+        params["excluded_classes"] = excluded
+        for name in excluded:
+            for key in ("g50", "beta", "alpha"):
+                params["classes"][name].pop(key, None)
+
+    FusionModel.from_dict("censored_llr", params, allow_excluded=True)
     write_json(args.out, params)
     return 0
 

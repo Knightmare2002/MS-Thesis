@@ -1,0 +1,121 @@
+diff --git a/damage3d/cli.py b/damage3d/cli.py
+index 0b88152..f672da2 100644
+--- a/damage3d/cli.py
++++ b/damage3d/cli.py
+@@ -82,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
+     g.add_argument("--observation-log", action="store_true",
+                    help="write <run>/observations: one record per valid point-view (u, v, depth, GSD, cos, probs)")
+     g.add_argument("--observation-subset", help=".npy of source indices to log (e.g. roi_points_index.npy)")
++    g.add_argument("--roi-only", action="store_true",
++                   help="project/accumulate/export ONLY the --observation-subset points (much faster ROI log)")
+     g.add_argument("--export-scope", choices=("all", "observed", "damage"), default="all")
+     g.add_argument("--normals", choices=("auto", "source", "none"), default="auto",
+                    help="copy nx/ny/nz of the source PLY into fused_points.ply (auto: when present)")
+@@ -151,6 +153,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
+         inference_scale=args.inference_scale,
+         observation_log=args.observation_log,
+         observation_subset=resolve_path(root, args.observation_subset, None),
++        roi_only=args.roi_only,
+         export_scope=args.export_scope,
+         normals=args.normals,
+         csv_max_points=args.csv_max_points,
+diff --git a/damage3d/pipeline.py b/damage3d/pipeline.py
+index cc70144..b1bc1c4 100644
+--- a/damage3d/pipeline.py
++++ b/damage3d/pipeline.py
+@@ -18,7 +18,7 @@ from .frames import resolve_frame
+ from .fusion import CAMERA_STAT_FIELDS, ChunkAccumulator, parse_thresholds
+ from .observations import ObservationLog, cos_incidence, make_records
+ from .metashape_xml import parse_cameras_xml, read_camera_list, select_cameras, selectable_cameras
+-from .ply_io import PlyPointSource, make_selection
++from .ply_io import PlyPointSource, PointSelection, make_selection
+ from .providers import CalibratedProvider, EnsembleProvider, FileProvider, SyntheticProvider
+ from .run_state import RunDirectory, file_identity, normalise, short_hash, write_json_atomic
+ from .sampling import sample_probabilities
+@@ -74,6 +74,7 @@ class RunConfig:
+     fusion_params: Path | None = None        # JSON: class rho (+ g50, beta for censored_llr; alpha)
+     observation_log: bool = False            # write <run>/observations (damage3d/observations.py)
+     observation_subset: Path | None = None   # .npy of source indices to log (default: all points)
++    roi_only: bool = False                   # process ONLY the observation-subset points (T7 ROI log)
+     inference_scale: float = 1.0            # additional resize not already captured by W/W_m
+     export_scope: str = "all"
+     normals: str = "auto"  # auto | source | none
+@@ -177,6 +178,18 @@ def _compute_chunk_bounds(ply, selection, ranges, frame) -> tuple[np.ndarray, np
+     return centers, radii
+ 
+ 
++def _roi_selection(cfg, ply) -> PointSelection:
++    """--roi-only: the point selection IS the observation subset (sorted, unique)."""
++    if not cfg.observation_log or cfg.observation_subset is None:
++        raise RuntimeError("--roi-only requires --observation-log and --observation-subset.")
++    if cfg.max_points is not None:
++        raise RuntimeError("--roi-only and --max-points are mutually exclusive.")
++    idx = np.unique(np.load(cfg.observation_subset).astype(np.int64))
++    if idx.size == 0 or idx[0] < 0 or idx[-1] >= ply.n_points:
++        raise RuntimeError(f"{cfg.observation_subset}: source indices outside [0, {ply.n_points}).")
++    return PointSelection(ply.n_points, idx, "observation_subset", None)
++
++
+ def _estimate_tolerance(cfg, occ, ply, selection) -> dict:
+     n = min(cfg.tolerance_sample_size, selection.size)
+     positions = (np.arange(n, dtype=np.int64) * selection.size) // n
+@@ -213,7 +226,10 @@ def plan(cfg: RunConfig) -> dict:
+             raise RuntimeError(f"Camera {cam.label}: non-zero {list(calib.unsupported_nonzero)} not supported.")
+ 
+     ply = PlyPointSource(cfg.point_cloud)
+-    selection = make_selection(ply.n_points, cfg.max_points, cfg.sample_mode, cfg.seed)
++    if cfg.roi_only:
++        selection = _roi_selection(cfg, ply)
++    else:
++        selection = make_selection(ply.n_points, cfg.max_points, cfg.sample_mode, cfg.seed)
+     provider = _build_provider(cfg)
+     missing_maps = provider.check_available([c.stem for _, c in selected])
+     if missing_maps:
+@@ -299,7 +315,9 @@ def run(cfg: RunConfig) -> dict:
+     abs_tol = 0.0
+     if occ is not None:
+         if cfg.occlusion_tolerance is None:
+-            tolerance_record.update(_estimate_tolerance(cfg, occ, ply, selection))
++            # Full cloud even with --roi-only: same occlusion tolerance as a full run.
++            tol_sel = make_selection(ply.n_points, None) if cfg.roi_only else selection
++            tolerance_record.update(_estimate_tolerance(cfg, occ, ply, tol_sel))
+             abs_tol = float(tolerance_record["auto_tolerance"])
+             tolerance_record["source"] = "auto: max(P95 point-to-mesh distance, 1e-4 * mesh diagonal)"
+         else:
+diff --git a/damage3d/tests/test_censored_fusion.py b/damage3d/tests/test_censored_fusion.py
+index 2fd5672..4c8808f 100644
+--- a/damage3d/tests/test_censored_fusion.py
++++ b/damage3d/tests/test_censored_fusion.py
+@@ -13,6 +13,7 @@ from damage3d.detectability import FusionModel
+ from damage3d.fusion import ChunkAccumulator, fuse
+ from damage3d.observations import OBS_DTYPE, load_observations, probs_of
+ from damage3d.pipeline import SimulatedInterruption
++from damage3d.ply_io import PlyPointSource
+ from damage3d.tests.scene import CHUNK_SCALE, CALIB, WIDTH, build_project
+ 
+ BETA = 1.0 / 3.0   # logistic scale in log g
+@@ -259,3 +260,24 @@ def test_fusion_params_from_calibration(tmp_path):
+     p = np.full((1, NUM_CLASSES), 0.3)
+     np.testing.assert_allclose(m.view_llr(p, None), m2.view_llr(p, None))
+     assert m2.posterior(np.zeros((1, NUM_CLASSES)), np.ones((1, NUM_CLASSES)))[0, 0] == pytest.approx(0.5)
++
++
++def test_roi_only_log_equals_full_log_restricted_to_subset(project_n, tmp_path):
++    """--roi-only processes only the subset; its observations equal the full-run log on the subset."""
++    n = PlyPointSource(project_n["root"] / "bridge_3dpc_point_cloud.ply").n_points
++    subset = np.sort(np.random.default_rng(3).choice(n, n // 5, replace=False)).astype(np.int64)
++    np.save(tmp_path / "roi.npy", subset)
++
++    def run(out, *extra):
++        assert main(["--project-root", str(project_n["root"]), "--output-dir", str(tmp_path / out),
++                     "--start-image", "0", "--end-image", "5", "--occlusion", "none", "--point-frame", "transformed", "--observation-log",
++                     "--observation-subset", str(tmp_path / "roi.npy"), *extra]) == 0
++
++    run("full")
++    run("roi", "--roi-only")
++    a, b = load_observations(tmp_path / "full"), load_observations(tmp_path / "roi")
++    assert len(a) > 0 and np.isin(b["source_index"], subset).all()
++    np.testing.assert_array_equal(a, b)
++    assert PlyPointSource(tmp_path / "roi" / "outputs" / "fused_points.ply").n_points == len(subset)
++    with pytest.raises(RuntimeError, match="mutually exclusive"):
++        run("bad", "--roi-only", "--max-points", "100")
